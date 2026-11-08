@@ -11,6 +11,7 @@ import { openModal } from './modal.js';
 import { toast } from './toast.js';
 import { refocus } from './bits.js';
 import { store } from '../lib/store.js';
+import { isPrivate } from '../lib/storage.js';
 import { CURRENCIES } from '../lib/money.js';
 import { sampleDataset } from '../lib/sample.js';
 
@@ -38,7 +39,9 @@ export function openOnboarding() {
       el('div.onboard-hero', {},
         el('img.onboard-icon', { src: './icon-192.png', alt: '', 'aria-hidden': 'true' }),
         el('h3', {}, 'Get paid without the busywork'),
-        el('p', {}, 'Estimates, invoices, recurring billing, receipts, and payment links. Everything lives in your own Puter cloud.')
+        el('p', {}, isPrivate
+          ? 'Estimates, invoices, recurring billing, receipts, and payment links. Your records and attachments stay on your Jetson. No Puter account or subscription is used.'
+          : 'Estimates, invoices, recurring billing, receipts, and payment links. Everything lives in your own Puter cloud.')
       ),
       el('button.btn.btn-primary.btn-block', {
         type: 'button', style: { minHeight: '44px' },

@@ -13,6 +13,8 @@ import { inviteLink } from '../lib/collab.js';
  *  - Read-only link: publishes a live snapshot anyone can view.
  */
 export function openShareSheet(list) {
+  if (store.isPrivate) return openModal({ title: 'Personal lists only',
+    content: el('p', {}, 'Sharing, feeds and collaboration are unavailable in private mode. Local JSON and ICS exports remain available.') });
   const body = el('div');
   const modal = openModal({ title: `Share "${list.name}"`, content: body });
 

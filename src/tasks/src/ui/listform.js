@@ -3,6 +3,7 @@ import { icon } from './icons.js';
 import { openModal, confirmDialog } from './modal.js';
 import { toast } from './toast.js';
 import { store, LIST_ICON_CHOICES } from '../lib/store.js';
+import { trackPrivateDraft } from '../lib/private-draft.js';
 
 /** Create/edit a list: name, color slot, icon. Delete lives here too. */
 export function openListForm({ list = null, onSaved = null } = {}) {
@@ -56,6 +57,7 @@ export function openListForm({ list = null, onSaved = null } = {}) {
   // Enter in the name input calls save() directly, so disabling the
   // button alone doesn't stop key auto-repeat from creating the list twice.
   let saving = false;
+  let savedList = list;
   async function save() {
     if (saving) return;
     if (!nameInput.value.trim()) {
@@ -67,10 +69,11 @@ export function openListForm({ list = null, onSaved = null } = {}) {
     }
     saving = true;
     saveBtn.disabled = true;
-    let saved = list;
+    let saved = savedList;
+    const submitted = JSON.stringify(draft);
     try {
-      if (editing) await store.updateList(list.id, { ...draft, name: nameInput.value });
-      else saved = await store.addList({ ...draft, name: nameInput.value });
+      if (savedList) await store.updateList(savedList.id, { ...draft, name: nameInput.value });
+      else saved = savedList = await store.addList({ ...draft, name: nameInput.value });
     } catch (err) {
       console.error(err);
       // A full cloud still keeps (and queues) the list, so the form is done —
@@ -84,6 +87,12 @@ export function openListForm({ list = null, onSaved = null } = {}) {
       }
       modal.close();
       toast(err.message, { icon: 'cloud', duration: 5000 });
+      return;
+    }
+    tracker.acknowledge(submitted);
+    if (store.isPrivate && JSON.stringify(draft) !== submitted) {
+      saving = false;
+      saveBtn.disabled = false;
       return;
     }
     modal.close();
@@ -120,6 +129,8 @@ export function openListForm({ list = null, onSaved = null } = {}) {
     )
   );
 
-  const modal = openModal({ title: editing ? 'Edit list' : 'New list', content: body });
+  const tracker = trackPrivateDraft(store, body, () => JSON.stringify(draft));
+  const modal = openModal({ title: editing ? 'Edit list' : 'New list', content: body,
+    onClose: () => tracker.dispose() });
   return modal;
 }

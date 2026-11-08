@@ -6,6 +6,7 @@
  */
 
 import { docPayLink } from './paylink.js';
+import { isPrivate } from './storage.js';
 import { SHARE_DIR, isMissingFileError, safeFileName, ownsAttachmentPath } from './store.js';
 
 function randomToken(len = 20) {
@@ -24,7 +25,7 @@ const isToken = (value) => /^[a-z0-9]{6,64}$/i.test(String(value ?? ''));
 
 /** The public URL for an already-shared document, or null. */
 export function shareUrl(settings, doc) {
-  if (!settings.share?.subdomain || !isToken(doc.shareToken)) return null;
+  if (isPrivate || !settings.share?.subdomain || !isToken(doc.shareToken)) return null;
   return `https://${settings.share.subdomain}.puter.site/${doc.shareToken}.html`;
 }
 
@@ -62,6 +63,7 @@ function withDoc(docId, fn) {
  * between (a file attached while a payment's refresh was still copying).
  */
 export function publishDoc(store, doc, payLink) {
+  if (isPrivate) return Promise.reject(new Error('Public sharing is disabled in private storage. Download a PDF instead.'));
   return withDoc(doc.id, () => publishNow(store, doc.id, payLink));
 }
 
@@ -191,6 +193,7 @@ async function recordShare(store, doc, token) {
  * truthful.
  */
 export async function republishIfShared(store, docId) {
+  if (isPrivate) return;
   // Decided inside the queue, from the document as it stands when this
   // refresh's turn comes: a takedown ahead of it has removed the token.
   await withDoc(docId, async () => {
@@ -207,6 +210,7 @@ export async function republishIfShared(store, docId) {
  * assurance. An already-missing file is fine, that is the desired state.
  */
 export async function unpublishDoc(store, doc) {
+  if (isPrivate) throw new Error('Private storage cannot remove a page previously published on Puter.');
   await withDoc(doc.id, async () => {
     const live = store.doc(doc.id) || doc;
     const token = live.shareToken;

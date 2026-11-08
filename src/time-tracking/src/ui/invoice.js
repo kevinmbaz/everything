@@ -11,6 +11,7 @@ import { openModal, confirmDialog } from './modal.js';
 import { toast, setToastsTabbable } from './toast.js';
 import { field, fieldError, nativeError, switchField } from './fields.js';
 import { logoURL } from './logo.js';
+import { trackPrivateDraft } from './private-status.js';
 import { openPrintOverlay } from './printsheet.js';
 import { openTimesheetSheet } from './timesheetprint.js';
 import {
@@ -148,7 +149,9 @@ function openLineForm({ line = null, currency, onSave, onRemove = null }) {
     }, 'Remove line')
   );
 
-  const modal = openModal({ title: isEdit ? 'Edit line' : 'Add a line', content: form });
+  const draft = trackPrivateDraft(form, store);
+  const modal = openModal({ title: isEdit ? 'Edit line' : 'Add a line', content: form, onClose: () => draft.dispose() });
+  return { close: modal.close, hasDraft: () => draft.capture().size > 0 };
 }
 
 /**
@@ -158,6 +161,9 @@ function openLineForm({ line = null, currency, onSave, onRemove = null }) {
  * the rest of the record, and opens the printable page.
  */
 export function openCreateInvoice({ client, entries = [] }) {
+  let issuedInvoice = null;
+  let saving = false;
+  let lineEditor = null;
   const targets = entries.filter((e) => e.billable && !e.invoicedAt);
   const currency = client.currency || store.settings.currency;
   const seconds = sum(targets, (e) => store.billedSeconds(e));
@@ -218,11 +224,11 @@ export function openCreateInvoice({ client, entries = [] }) {
         el('button.entry-main', {
           type: 'button',
           'aria-label': `Edit line: ${l.label || LINE_LABEL[l.kind]}`,
-          onclick: () => openLineForm({
+          onclick: () => lineEditor = openLineForm({
             line: l,
             currency,
-            onSave: (next) => { lines[i] = next; renderLines(); renderTotals(); },
-            onRemove: () => { lines.splice(i, 1); renderLines(); renderTotals(); },
+            onSave: (next) => { lines[i] = next; draft.mark(linesBox); renderLines(); renderTotals(); },
+            onRemove: () => { lines.splice(i, 1); draft.mark(linesBox); renderLines(); renderTotals(); },
           }),
         },
           el('div.entry-text', {},
@@ -245,9 +251,9 @@ export function openCreateInvoice({ client, entries = [] }) {
       type: 'button',
       style: { marginTop: lines.length ? '8px' : '0' },
       html: icon('plus', 15, 2.2),
-      onclick: () => openLineForm({
+      onclick: () => lineEditor = openLineForm({
         currency,
-        onSave: (next) => { lines.push(next); renderLines(); renderTotals(); },
+        onSave: (next) => { lines.push(next); draft.mark(linesBox); renderLines(); renderTotals(); },
       }),
     }, ' Add a fee, expense, or discount'));
   };
@@ -278,8 +284,8 @@ export function openCreateInvoice({ client, entries = [] }) {
     // Nothing to bill, or a discount deeper than the invoice: either way
     // there is no honest document to issue, so the button says so.
     const nothing = !targets.length && !lines.length;
-    save.disabled = nothing || totals.total < 0;
-    save.textContent = nothing ? 'Add time or a line to invoice'
+    save.disabled = saving || !!issuedInvoice || nothing || totals.total < 0;
+    save.textContent = issuedInvoice ? 'Invoice saved — copy newer draft fields before closing' : nothing ? 'Add time or a line to invoice'
       : totals.total < 0 ? 'The discount is larger than the invoice'
         : `Create invoice ${invoiceNumber(nextNumber)}`;
   };
@@ -293,6 +299,7 @@ export function openCreateInvoice({ client, entries = [] }) {
   const form = el('form.form', {
     onsubmit: async (e) => {
       e.preventDefault();
+      if (saving || issuedInvoice) return;
       const rate = currentRate();
       if (rate == null) {
         taxErr.show(TAX_ERROR);
@@ -300,6 +307,8 @@ export function openCreateInvoice({ client, entries = [] }) {
         return;
       }
       save.disabled = true;
+      saving = true;
+      const generation = draft.capture();
       let invoice;
       try {
         invoice = await store.createInvoice({
@@ -314,9 +323,18 @@ export function openCreateInvoice({ client, entries = [] }) {
       } catch (err) {
         console.error(err);
         save.disabled = false;
+        saving = false;
         toast('Could not create the invoice, check your connection', { icon: 'wifiOff' });
         return;
       }
+      saving = false;
+      issuedInvoice = invoice;
+      if (store.privateMode && (!draft.acknowledge(generation) || lineEditor?.hasDraft())) {
+        renderTotals();
+        toast('Invoice saved; copy newer draft fields before closing. Reopen the saved invoice from Reports.');
+        return;
+      }
+      draft.dispose();
       modal.close();
       toast(`Invoice ${invoiceNumber(invoice.number)} created`, { icon: 'receipt' });
       openInvoiceView(invoice);
@@ -347,7 +365,11 @@ export function openCreateInvoice({ client, entries = [] }) {
     save
   );
 
-  const modal = openModal({ title: 'Create invoice', content: form });
+  const draft = trackPrivateDraft(form, store);
+  const modal = openModal({ title: 'Create invoice', content: form, onClose: () => {
+    lineEditor?.close();
+    draft.dispose();
+  } });
 }
 
 /**

@@ -110,7 +110,7 @@ function reportDetail({ navigate, id }) {
     }, transitionLabel(report.status));
 
     const more = el('div.page-actions', {},
-      report.status === 'submitted' && el('button.btn.btn-ghost', { type: 'button', html: icon('undo', 16, 2.2), onclick: async () => { await store.transitionReport(id, 'draft').catch(() => toast('Couldn’t withdraw', { icon: 'wifiOff' })); toast('Report back in draft'); } }, 'Withdraw'),
+      report.status === 'submitted' && el('button.btn.btn-ghost', { type: 'button', html: icon('undo', 16, 2.2), onclick: async () => { await store.transitionReport(id, 'draft').then(() => toast('Report back in draft')).catch(() => toast('Couldn’t withdraw', { icon: 'wifiOff' })); } }, 'Withdraw'),
       el('button.btn.btn-outline', { type: 'button', html: icon('sheet', 16, 2.2), onclick: () => {
         if (!expenses.length) { toast('Nothing to export', { icon: 'info' }); return; }
         downloadBlob(new Blob([expensesToCSV(expenses, { categories: store.categories, reports: store.reports })], { type: 'text/csv;charset=utf-8' }), `${report.title.replace(/[^\w-]+/g, '-')}.csv`);
@@ -181,8 +181,12 @@ function reportDetail({ navigate, id }) {
     };
     renderList();
     addBtn.onclick = async () => {
+      if (addBtn.disabled) return;
       addBtn.disabled = true;
+      const controls = store.sdk?.mode === 'private' ? [...list.querySelectorAll('input, button')] : [];
+      for (const control of controls) control.disabled = true;
       try { await store.setReport([...picked], report.id); modal.close(); toast(`${picked.size} added to ${report.title}`); } catch (err) { console.error(err); addBtn.disabled = false; toast('Couldn’t add', { icon: 'wifiOff' }); }
+      finally { for (const control of controls) control.disabled = false; }
     };
     const modal = openModal({ title: 'Add expenses', content: el('div', {}, list, el('div.row.end', {}, el('button.btn.btn-ghost', { type: 'button', onclick: () => modal.close() }, 'Cancel'), addBtn)) });
   }
@@ -203,11 +207,18 @@ export function openReportForm({ report = null, onSaved = null } = {}) {
   const form = el('form', {
     onsubmit: async (e) => {
       e.preventDefault();
+      if (save.disabled) return;
       save.disabled = true;
+      const generation = modal.editGeneration;
       try {
         const data = { title: title.value.trim() || title.placeholder, notes: notes.value.trim() };
         const saved = report ? await store.updateReport(report.id, data) : await store.createReport(data);
-        modal.close();
+        if (!modal.closeIfUnchanged(generation)) {
+          report = saved;
+          save.disabled = false;
+          save.textContent = 'Save';
+          return;
+        }
         toast(report ? 'Report updated' : 'Report created');
         onSaved?.(saved);
       } catch (err) { console.error(err); save.disabled = false; toast('Couldn’t save', { icon: 'wifiOff' }); }

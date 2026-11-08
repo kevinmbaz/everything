@@ -9,12 +9,14 @@ import { entryRow } from '../ui/entryrow.js';
 import { openEntryForm } from '../ui/entryform.js';
 import { targetStatTile, moneyValue } from '../ui/stats.js';
 import { openTimerEdit } from '../ui/timeredit.js';
+import { trackPrivateDraft } from '../ui/private-status.js';
 import { store } from '../lib/store.js';
 import { fmtTimer, fmtClock, fmtDuration, todayISO, weekStartOf, addDays } from '../lib/time.js';
 
 export function timerView() {
   const root = el('div.view');
   const timerCard = el('section.timer-card', { 'aria-label': 'Timer' });
+  const privateDraft = trackPrivateDraft(timerCard, store);
   const statsRow = el('div.stat-row');
   const todayList = el('div');
   let tick = null;
@@ -105,12 +107,17 @@ export function timerView() {
           return;
         }
         start.disabled = true;
+        const generation = privateDraft.capture();
         try {
           await store.startTimer({
             projectId: project.value,
             task: task.value,
             billable: billable.input.checked,
           });
+          if (store.privateMode && !privateDraft.acknowledge(generation)) {
+            toast('Timer started; newer draft is kept for your next timer');
+            return;
+          }
           // The draft became a running timer; the next idle form starts clean.
           draft.projectId = null;
           draft.task = '';
@@ -323,6 +330,7 @@ export function timerView() {
   onChange();
 
   root.destroy = () => {
+    privateDraft.dispose();
     clearInterval(tick);
     store.removeEventListener('change', onChange);
   };

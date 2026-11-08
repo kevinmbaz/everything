@@ -1,0 +1,4 @@
+# Generated opt-in Jetson build; keep the standard dist build separate.
+dist-private/
+# Python test/import caches for the private storage server.
+__pycache__/

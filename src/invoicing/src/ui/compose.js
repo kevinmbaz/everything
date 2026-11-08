@@ -18,6 +18,7 @@ import { field, copyText, refocus } from './bits.js';
 import { store, isMissingFileError } from '../lib/store.js';
 import { fileSize } from '../lib/util.js';
 import { docPayLink } from '../lib/paylink.js';
+import { isPrivate } from '../lib/storage.js';
 import { publishDoc, unpublishDoc, shareUrl } from '../lib/share.js';
 import { buildMessage, mailtoUrl, looksLikeEmail } from '../lib/message.js';
 import {
@@ -72,14 +73,16 @@ export async function openCompose(doc, {
 
   let link = shareUrl(store.settings, live) || '';
   const origin = location.hash;
-  const publishing = toast('Publishing the online copy…', { icon: 'globe', duration: 20000 });
-  try {
-    link = await publishDoc(store, live, payLink);
-  } catch (err) {
-    console.error(err);
-    toast('Could not publish the online copy. The message goes out without a link', { icon: 'wifiOff' });
-  } finally {
-    publishing.dismiss();
+  if (!isPrivate) {
+    const publishing = toast('Publishing the online copy…', { icon: 'globe', duration: 20000 });
+    try {
+      link = await publishDoc(store, live, payLink);
+    } catch (err) {
+      console.error(err);
+      toast('Could not publish the online copy. The message goes out without a link', { icon: 'wifiOff' });
+    } finally {
+      publishing.dismiss();
+    }
   }
 
   // The publish can outlive the page that asked for it. If the user walked

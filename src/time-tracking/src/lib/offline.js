@@ -19,13 +19,15 @@
  * simply behaves as before (online-only).
  */
 
+import { isPrivateStorage } from './storage-mode.js';
+
 const ROOT = 'hourly:cache:v1';
 const META_KEY = `${ROOT}:user`;
 const MONTH_CAP = 24;
 
 let meta = null;
 try {
-  meta = JSON.parse(localStorage.getItem(META_KEY) || 'null');
+  if (!isPrivateStorage) meta = JSON.parse(localStorage.getItem(META_KEY) || 'null');
   if (!meta?.uuid) meta = null;
 } catch { meta = null; }
 
@@ -44,6 +46,7 @@ function lsRemove(key) {
 }
 
 function allCacheKeys() {
+  if (isPrivateStorage) return [];
   const keys = [];
   try {
     for (let i = 0; i < localStorage.length; i++) {
@@ -108,6 +111,7 @@ export const offline = {
   },
 
   setUser(user) {
+    if (isPrivateStorage) return;
     if (!user?.uuid) return;
     meta = { uuid: user.uuid, username: user.username || '' };
     lsSet(META_KEY, JSON.stringify(meta));
@@ -211,6 +215,7 @@ export const offline = {
    * and write queue then serve the whole app from local data.
    */
   installStub() {
+    if (isPrivateStorage) throw new Error('Offline SDK is disabled in private mode');
     const fail = () => Promise.reject(new TypeError('Offline: Puter is unreachable'));
     window.puter = {
       env: 'web',

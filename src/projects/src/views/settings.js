@@ -1,3 +1,4 @@
+import { auth, isPrivateStorage, isPuterDesktop } from '../lib/storage.js';
 import { el, clear } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
 import { radioGroupKeys } from '../ui/bits.js';
@@ -18,6 +19,7 @@ import { menuButton } from '../ui/navdrawer.js';
 import { notificationState, requestNotificationPermission } from '../ui/reminders.js';
 
 export async function confirmSignOut() {
+  if (isPrivateStorage) return;
   const ok = await confirmDialog({
     title: 'Sign out?',
     message: 'Your data stays safe in your Puter account and is here when you sign back in.',
@@ -37,7 +39,7 @@ export async function confirmSignOut() {
     });
     if (!discard) return;
   }
-  puter.auth.signOut();
+  auth.signOut();
   location.hash = '#/';
   location.reload();
 }
@@ -196,6 +198,7 @@ export function settingsView() {
     ),
 
     section('Data',
+      isPrivateStorage && row({ ic: 'cloudOff', title: 'Puter Drive unavailable', sub: 'Upload files from your device. Download exports and full ZIP backups locally; Drive links and Drive export are disabled.' }),
       row({
         ic: 'download',
         title: 'Export everything',
@@ -257,17 +260,17 @@ export function settingsView() {
     ),
 
     section('Account',
-      row({ ic: 'users', title: username, sub: 'Signed in with Puter' }),
+      row({ ic: 'users', title: username, sub: isPrivateStorage ? 'Stored on your Jetson. Access controlled by your private connection.' : 'Signed in with Puter' }),
       // Inside the Puter desktop, the session belongs to the OS — no sign-out.
-      puter.env !== 'app' && row({
+      !isPrivateStorage && !isPuterDesktop() && row({
         ic: 'logout', title: 'Sign out', sub: 'Your data stays in your Puter account',
         control: el('button.btn.btn-ghost.btn-sm', { onclick: confirmSignOut }, 'Sign out'),
       })
     ),
 
     section('About',
-      row({ ic: 'board', title: 'Project Management', sub: 'Boards, timelines, and milestones. Your data lives in your own Puter cloud.' }),
-      row({
+      row({ ic: 'board', title: 'Project Management', sub: isPrivateStorage ? 'Private Projects. No browser data mirror or offline write replay. Keep regular downloaded backups.' : 'Boards, timelines, and milestones. Your data lives in your own Puter cloud.' }),
+      !isPrivateStorage && row({
         ic: 'cloud', title: 'Powered by Puter',
         control: el('a.btn.btn-ghost.btn-sm', { href: 'https://developer.puter.com', target: '_blank', rel: 'noopener' }, 'Learn more'),
       })

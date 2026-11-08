@@ -277,16 +277,29 @@ export function openImport() {
     return el('label.check-row', {}, input, el('span', {}, label));
   }
 
+  let importing = false;
   async function doImport(lines) {
-    const existing = await store.loadStatements();
-    const fresh = lines.filter((l) => !isDuplicateLine(l, existing));
-    const dupes = lines.length - fresh.length;
-    if (!fresh.length) { toast('Every line is already imported', { icon: 'info' }); modal.close(); return; }
+    if (importing) return;
+    const privateMode = store.sdk?.mode === 'private';
+    importing = privateMode;
+    // A statement batch has no edit-in-place form: freeze its snapshot until
+    // acknowledgement instead of accepting edits that cannot be saved back.
+    const controls = privateMode ? [...body.querySelectorAll('input, select, button')].map(node => [node, node.disabled]) : [];
+    for (const [node] of controls) node.disabled = true;
+    const source = sourceInput.value.trim() || 'Statement';
     try {
-      await store.addStatementLines(fresh, { source: sourceInput.value.trim() || 'Statement' });
+      const existing = await store.loadStatements();
+      const fresh = lines.filter((l) => !isDuplicateLine(l, existing));
+      const dupes = lines.length - fresh.length;
+      if (!fresh.length) { toast('Every line is already imported', { icon: 'info' }); modal.close(); return; }
+      await store.addStatementLines(fresh, { source });
       modal.close();
       toast(`${fresh.length} line${fresh.length === 1 ? '' : 's'} imported${dupes ? `, ${dupes} duplicate${dupes === 1 ? '' : 's'} skipped` : ''}`);
     } catch (err) { console.error(err); toast('Couldn’t import. Check your connection', { icon: 'wifiOff' }); }
+    finally {
+      importing = false;
+      for (const [node, disabled] of controls) node.disabled = disabled;
+    }
   }
 
   renderPick();

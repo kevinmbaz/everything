@@ -99,6 +99,7 @@ export function createCalendar({
 
   /** Can we talk to other apps at all? Only true inside the Puter desktop. */
   function supported() {
+    if (import.meta.env.VITE_PRIVATE_STORAGE === '1') return false
     const p = getPuter()
     return Boolean(p && p.env === 'app' && p.ui && typeof p.ui.launchApp === 'function')
   }

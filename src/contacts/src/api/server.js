@@ -65,6 +65,7 @@ export function startApiServer({
   revision = null,
   onActivity = null,
 }) {
+  if (import.meta.env.VITE_PRIVATE_STORAGE === '1') return null
   if (!connection || typeof connection.postMessage !== 'function') return null
 
   const granted = grantedMethods(callerApp, allowed)

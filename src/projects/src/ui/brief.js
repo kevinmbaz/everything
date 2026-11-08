@@ -1,7 +1,7 @@
+import { persistInput } from '../lib/private-browser.js';
 import { el, clear } from '../lib/dom.js';
 import { icon } from './icons.js';
 import { store, docBrief } from '../lib/store.js';
-import { debounce } from '../lib/util.js';
 import { markdownFragment } from './markdown.js';
 
 /**
@@ -53,7 +53,7 @@ export function briefPanel({ projectId }) {
     rows: 6,
     placeholder: PLACEHOLDER,
     'aria-label': 'Project brief',
-    oninput: debounce(() => save(), 500),
+    oninput: persistInput(() => save(), 500),
     onkeydown: (e) => {
       if (e.isComposing) return;
       // Escape and Cmd/Ctrl+Enter both mean "done editing", as in the task

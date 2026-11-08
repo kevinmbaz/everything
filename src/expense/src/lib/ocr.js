@@ -138,6 +138,7 @@ function messageText(res) {
  * Resolves to { result, source, rawText } where source is 'vision' or 'ocr'.
  */
 export async function runReceiptOcr(file, { categories, baseCurrency, model = DEFAULT_OCR_MODEL, sdk = globalThis.puter, now = new Date() } = {}) {
+  if (import.meta.env.VITE_PRIVATE_STORAGE === '1' || sdk?.mode === 'private') throw new Error('Cloud OCR is unavailable in private mode. Enter receipt fields manually.');
   const prompt = buildOcrPrompt({ categories, baseCurrency });
   let lastError = null;
   try {

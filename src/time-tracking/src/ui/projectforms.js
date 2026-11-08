@@ -5,6 +5,7 @@ import { icon } from './icons.js';
 import { openModal } from './modal.js';
 import { toast } from './toast.js';
 import { field, fieldError, nativeError, switchField, rateHistoryLine, RATE_ERROR } from './fields.js';
+import { trackPrivateDraft } from './private-status.js';
 import { store, rateAt, withRateFrom } from '../lib/store.js';
 import { startLinkFor } from '../lib/urlaction.js';
 import {
@@ -99,6 +100,7 @@ function startLinkField(project) {
 
 export function openClientForm({ client = null, onSaved = null } = {}) {
   const isEdit = !!client;
+  let savedId = client?.id;
   const name = el('input.input', {
     type: 'text', value: client?.name || '', placeholder: 'e.g. Acme Studio',
     required: true, maxLength: 80, autocomplete: 'off',
@@ -261,15 +263,23 @@ export function openClientForm({ client = null, onSaved = null } = {}) {
       };
       // Disabled while saving so a double-click cannot add twice.
       save.disabled = true;
+      const generation = draft.capture();
       try {
-        if (isEdit) await store.updateClient(client.id, data);
-        else await store.addClient(data);
+        if (savedId) await store.updateClient(savedId, data);
+        else savedId = (await store.addClient(data)).id;
       } catch (err) {
         console.error(err);
         save.disabled = false;
         toast('Could not save, check your connection', { icon: 'wifiOff' });
         return;
       }
+      if (store.privateMode && !draft.acknowledge(generation)) {
+        save.disabled = false;
+        save.textContent = 'Save changes';
+        toast('Earlier version saved to Jetson; newer edits are still unsaved');
+        return;
+      }
+      draft.dispose();
       modal.close();
       toast(isEdit ? 'Client updated' : 'Client added');
       onSaved?.();
@@ -307,11 +317,13 @@ export function openClientForm({ client = null, onSaved = null } = {}) {
     save
   );
 
-  const modal = openModal({ title: isEdit ? 'Edit client' : 'New client', content: form });
+  const draft = trackPrivateDraft(form, store);
+  const modal = openModal({ title: isEdit ? 'Edit client' : 'New client', content: form, onClose: () => draft.dispose() });
 }
 
 export function openProjectForm({ project = null, clientId = null, onSaved = null } = {}) {
   const isEdit = !!project;
+  let savedId = project?.id;
   const clients = store.activeClients();
   if (!clients.length && !isEdit) {
     toast('Add a client first', { icon: 'users' });
@@ -421,15 +433,23 @@ export function openProjectForm({ project = null, clientId = null, onSaved = nul
       };
       // Disabled while saving so a double-click cannot add twice.
       save.disabled = true;
+      const generation = draft.capture();
       try {
-        if (isEdit) await store.updateProject(project.id, data);
-        else await store.addProject(data);
+        if (savedId) await store.updateProject(savedId, data);
+        else savedId = (await store.addProject(data)).id;
       } catch (err) {
         console.error(err);
         save.disabled = false;
         toast('Could not save, check your connection', { icon: 'wifiOff' });
         return;
       }
+      if (store.privateMode && !draft.acknowledge(generation)) {
+        save.disabled = false;
+        save.textContent = 'Save changes';
+        toast('Earlier version saved to Jetson; newer edits are still unsaved');
+        return;
+      }
+      draft.dispose();
       modal.close();
       toast(isEdit ? 'Project updated' : 'Project added');
       onSaved?.();
@@ -451,5 +471,6 @@ export function openProjectForm({ project = null, clientId = null, onSaved = nul
     isEdit && startLinkField(project)
   );
 
-  const modal = openModal({ title: isEdit ? 'Edit project' : 'New project', content: form });
+  const draft = trackPrivateDraft(form, store);
+  const modal = openModal({ title: isEdit ? 'Edit project' : 'New project', content: form, onClose: () => draft.dispose() });
 }

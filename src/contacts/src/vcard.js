@@ -54,9 +54,10 @@ function typeParam(label, map) {
 }
 
 /** Serialize a single contact to a vCard 3.0 string. */
-export function contactToVCard(contact) {
+export function contactToVCard(contact, { preserveIds = false } = {}) {
   const c = normalizeContact(contact)
   const lines = ['BEGIN:VCARD', 'VERSION:3.0']
+  if (preserveIds) lines.push(`UID:${escapeValue(c.id)}`)
 
   lines.push(`N:${escapeValue(c.lastName)};${escapeValue(c.firstName)};;;`)
   lines.push(`FN:${escapeValue(displayName(c))}`)
@@ -90,8 +91,8 @@ export function contactToVCard(contact) {
 }
 
 /** Serialize many contacts into one .vcf document. */
-export function contactsToVCard(contacts) {
-  return contacts.map(contactToVCard).join('\r\n') + '\r\n'
+export function contactsToVCard(contacts, options) {
+  return contacts.map(c => contactToVCard(c, options)).join('\r\n') + '\r\n'
 }
 
 // --- import -----------------------------------------------------------------
@@ -210,7 +211,7 @@ function unfold(text) {
 }
 
 /** Parse a .vcf document into an array of normalized contacts. */
-export function vCardToContacts(text) {
+export function vCardToContacts(text, { preserveIds = false } = {}) {
   const lines = unfold(text).split('\n')
   const contacts = []
   let cur = null
@@ -248,19 +249,32 @@ export function vCardToContacts(text) {
     // Property name may carry a group prefix (e.g. "item1.EMAIL").
     const name = segments[0].split('.').pop().toUpperCase()
     const params = segments.slice(1)
+    // Capture literal UID whitespace before advancing i through continuations.
+    // Other fields retain their existing trim/display semantics.
+    const literalUid = preserveIds && name === 'UID'
+    if (literalUid) value = lines[i].slice(colon + 1)
 
     // Quoted-printable soft line breaks: a trailing '=' continues the value on
     // the next physical line (vCard 2.1 folding — no leading space, so the
     // standard unfold above didn't join it).
     const qp = isQuotedPrintable(params)
     while (qp && value.endsWith('=') && i + 1 < lines.length) {
-      value = value.slice(0, -1) + lines[++i].trimEnd()
+      const continuation = lines[++i]
+      value = value.slice(0, -1) + (literalUid ? continuation : continuation.trimEnd())
     }
     // Decode after splitting on separators (an encoded =3B is a literal ';',
     // not a component separator), so each component decodes on its own.
     const uv = qp ? (s) => unescapeValue(decodeQuotedPrintable(s)) : unescapeValue
 
     switch (name) {
+      case 'UID': {
+        if (!preserveIds) break
+        // Unlike display fields, UID bytes are identifiers, not trim-able text.
+        const id = uv(value)
+        if (!id || [...id].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127) || Object.hasOwn(cur, 'id')) throw new Error('Invalid or duplicate vCard UID')
+        cur.id = id
+        break
+      }
       case 'N': {
         const comps = splitUnescaped(value, ';').map(uv)
         cur.lastName = comps[0] || ''

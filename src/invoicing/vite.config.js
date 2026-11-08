@@ -1,6 +1,15 @@
 import { defineConfig } from 'vite';
 import puterLocalhost from '../../dev/puter-localhost.mjs';
 
+const privateStorage = process.env.VITE_PRIVATE_STORAGE === '1';
+const privateBuild = {
+  name: 'private-storage',
+  transformIndexHtml(html) {
+    return html.replace('<script src="https://js.puter.com/v2/" defer></script>', '')
+      .replace('stored in your own Puter cloud', 'stored privately on your Jetson');
+  },
+};
+
 /**
  * The service worker, written from the bundle that was just built.
  *
@@ -63,7 +72,7 @@ const SHELL = ${JSON.stringify(shell, null, 2)};
 /* The Puter SDK is loaded from its own origin. It is runtime-cached so an
    installed app has it offline, but nothing about the offline path may
    depend on it resolving: the app boots from its own local snapshot. */
-const SDK = 'https://js.puter.com/';
+const SDK = ${JSON.stringify(privateStorage ? '' : 'https://js.puter.com/')};
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
@@ -92,6 +101,8 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
+  // Storage is authoritative on the server, never in a worker cache.
+  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) return;
 
   /* The app's own navigations: the cached shell first, so an offline launch
      paints instantly, with the network refreshing it in the background. */
@@ -109,7 +120,7 @@ self.addEventListener('fetch', (event) => {
 
   /* The SDK: network first so it stays current, cache as the fallback. An
      opaque response is fine — it replays exactly as it arrived. */
-  if (request.url.startsWith(SDK)) {
+  if (SDK && request.url.startsWith(SDK)) {
     event.respondWith((async () => {
       try {
         const response = await fetch(request);
@@ -146,8 +157,9 @@ self.addEventListener('fetch', (event) => {
 
 export default defineConfig({
   base: './',
-  plugins: [puterLocalhost('invoicing'), serviceWorker()],
+  plugins: [puterLocalhost('invoicing'), serviceWorker(), ...(privateStorage ? [privateBuild] : [])],
   build: {
+    outDir: privateStorage ? 'dist-private' : 'dist',
     target: 'es2022',
     cssTarget: 'safari15',
   },

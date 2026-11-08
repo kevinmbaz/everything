@@ -3,6 +3,7 @@ import { icon } from './icons.js';
 import { toast, mountToastRoot } from './toast.js';
 import { confirmDialog, openModal, closeAllModals } from './modal.js';
 import { store } from '../lib/store.js';
+import { isPrivate } from '../lib/storage.js';
 import { todayISO } from '../lib/dates.js';
 import { docStatus } from '../lib/doc.js';
 import { wipeSampleData } from '../lib/sample.js';
@@ -255,7 +256,7 @@ export function mountShell(appRoot) {
     avatar.textContent = (business || user).charAt(0).toUpperCase();
     acctName.textContent = business || user;
     acctName.title = business || user;
-    acctSub.textContent = business ? user : 'Puter account';
+    acctSub.textContent = isPrivate ? 'Stored on your Jetson' : (business ? user : 'Puter account');
     acctSub.title = acctSub.textContent;
   }
   renderUser();
@@ -377,7 +378,7 @@ export function mountShell(appRoot) {
     // Below the rule: the shell's own settings, and the way out of it.
     for (const r of ROUTES.filter((x) => x.foot)) sidebarFoot.append(navItem(r));
     // Inside the Puter desktop, sessions belong to the OS shell, not the app.
-    if (!isPuterApp) {
+    if (!isPrivate && !isPuterApp) {
       sidebarFoot.append(el('button.nav-item', {
         type: 'button',
         html: icon('logout', 17, 1.7),

@@ -1,6 +1,7 @@
 import { el, clear } from '../ui/dom.js';
 import { icon } from '../ui/icons.js';
 import { toast } from '../ui/toast.js';
+import { isPrivate } from '../lib/storage.js';
 import { openModal, confirmDialog } from '../ui/modal.js';
 import { statusChip, field, selectWrap, copyText, emptyState, keepFocus, refocus } from '../ui/bits.js';
 import { paperHTML } from '../ui/paper.js';
@@ -237,7 +238,7 @@ export function detailView({ navigate, params }) {
     if (payLink && isInvoice && status !== 'void' && status !== 'draft') {
       add('Copy payment link', 'link', () => copyText(payLink, 'Payment link copied'), { secondary: true });
     }
-    if (status !== 'void' && status !== 'draft') {
+    if (!isPrivate && status !== 'void' && status !== 'draft') {
       add(doc.shareToken ? 'Update share page' : 'Share online', 'share', () => shareNow(doc), { secondary: true });
     }
     add('Duplicate', 'copy', () => act(async () => {
@@ -540,7 +541,7 @@ export function detailView({ navigate, params }) {
         }, files.length >= MAX_ATTACHMENTS ? ' Attachment limit reached' : ' Add a file'),
         el('p.side-note', {},
           `Drag files here. Up to ${Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))} MB each, `
-          + `${MAX_ATTACHMENTS} per document. They stay in your own cloud.`),
+          + `${MAX_ATTACHMENTS} per document. ` + (isPrivate ? 'They stay on your Jetson.' : 'They stay in your own cloud.')),
         picker);
 
       const shareBox = el('input', {
@@ -589,7 +590,7 @@ export function detailView({ navigate, params }) {
               onclick: async () => {
                 const ok = await confirmDialog({
                   title: `Remove ${f.name}?`,
-                  message: 'The file is deleted from your cloud. This cannot be undone.',
+                  message: isPrivate ? 'The file is deleted from your Jetson storage. This cannot be undone from the app.' : 'The file is deleted from your cloud. This cannot be undone.',
                 });
                 if (!ok) return;
                 await act(async () => {
@@ -609,7 +610,7 @@ export function detailView({ navigate, params }) {
         drop,
         // Publishing copies these files to a public URL, which is not what
         // everyone wants from a timesheet: off unless it is asked for.
-        files.length && !store.readOnly
+        files.length && !store.readOnly && !isPrivate
           ? el('label.check-row.attach-share', {}, shareBox,
             el('span', {}, 'Offer these on the public page',
               el('span.field-hint', {}, ' (copies them beside the shared page while it is shared)')))

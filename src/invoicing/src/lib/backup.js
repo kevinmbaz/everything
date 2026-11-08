@@ -8,6 +8,7 @@
  */
 
 import { DEFAULT_SETTINGS, SHARE_DIR, isMissingFileError, ownsAttachmentPath } from './store.js';
+import { storage } from './storage.js';
 
 export const BACKUP_VERSION = 1;
 
@@ -206,12 +207,12 @@ export async function retireSharePages(store, backupTokens = []) {
     // deletions, counting the token once if either fails; missing is fine.
     let tokenFailed = false;
     try {
-      await puter.fs.delete(`${SHARE_DIR}/${token}`, { recursive: true });
+      await storage.fs.delete(`${SHARE_DIR}/${token}`, { recursive: true });
     } catch (err) {
       if (!isMissingFileError(err)) tokenFailed = true;
     }
     try {
-      await puter.fs.delete(`${SHARE_DIR}/${token}.html`);
+      await storage.fs.delete(`${SHARE_DIR}/${token}.html`);
     } catch (err) {
       if (!isMissingFileError(err)) tokenFailed = true;
     }
@@ -237,8 +238,8 @@ export async function missingAttachments(store, { limit = 200 } = {}) {
     if (checked >= limit) break;
     checked++;
     try {
-      if (puter.fs.stat) await puter.fs.stat(entry.path);
-      else await puter.fs.read(entry.path);
+      if (storage.fs.stat) await storage.fs.stat(entry.path);
+      else await storage.fs.read(entry.path);
     } catch (err) {
       if (isMissingFileError(err)) missing++;
     }

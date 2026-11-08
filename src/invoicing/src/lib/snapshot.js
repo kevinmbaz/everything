@@ -12,8 +12,11 @@
  * is the shape the store already knows how to be filled from.
  */
 
-export const SNAPSHOT_KEY = 'invoicing:snapshot:v1';
-export const SNAPSHOT_ENABLED_KEY = 'invoicing:offline:v1';
+import { isPrivate } from './storage.js';
+
+const prefix = isPrivate ? 'invoicing:private' : 'invoicing';
+export const SNAPSHOT_KEY = `${prefix}:snapshot:v1`;
+export const SNAPSHOT_ENABLED_KEY = `${prefix}:offline:v1`;
 export const SNAPSHOT_VERSION = 1;
 
 /**

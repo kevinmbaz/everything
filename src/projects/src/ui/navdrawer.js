@@ -1,3 +1,4 @@
+import { isPrivateStorage, isPuterDesktop } from '../lib/storage.js';
 import { el, clear } from '../lib/dom.js';
 import { icon } from './icons.js';
 import { appIcon, accentAvatar } from './bits.js';
@@ -129,7 +130,7 @@ export function createNav({ className = 'sidebar', brand = true, onActivate } = 
     el('div.sidebar-user', {},
       accentAvatar(username, 26, { decorative: true }),
       el('span.name', { title: username }, username),
-      puter.env !== 'app' && el('button.icon-btn', {
+      !isPrivateStorage && !isPuterDesktop() && el('button.icon-btn', {
         html: icon('logout', 17, 2),
         'aria-label': 'Sign out',
         title: 'Sign out',

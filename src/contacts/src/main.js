@@ -3,6 +3,8 @@
 // src/api/), there is no UI to mount — see bootService() at the bottom.
 import './styles.css'
 import { hasPuter, isPuterApp, isSignedIn } from './env.js'
+import { privateMode, getStorage } from './storage.js'
+import { escapeHtml } from './format.js'
 import { store } from './store.js'
 import { mountApp } from './ui/app.js'
 import { readLaunchContext } from './api/protocol.js'
@@ -11,7 +13,7 @@ import { startApiServer } from './api/server.js'
 import { createSampleDataPopulator } from './demo.js'
 
 window.contacts = { populateSampleData: createSampleDataPopulator(() =>
-  !launch.serviceMode && (isPuterApp() || isSignedIn()) ? store : null,
+  !privateMode && !launch.serviceMode && (isPuterApp() || isSignedIn()) ? store : null,
 ) }
 
 // The browser HTTP cache can otherwise hand back stale KV responses right after
@@ -227,7 +229,17 @@ function exit() {
   }
 }
 
-function init() {
+async function init() {
+  if (privateMode) {
+    try {
+      const user = await getStorage().ready()
+      await store.load()
+      mountApp(root, { email: user.username })
+    } catch (error) {
+      fatal('Private storage unavailable', escapeHtml(error.message))
+    }
+    return
+  }
   if (!hasPuter) {
     fatal('Connection problem', 'Could not reach Puter. Check your connection and reload.')
     return
@@ -249,7 +261,7 @@ function init() {
 // cloud data or auth. Skipped in dev, inside the Puter desktop shell, and where
 // service workers are unavailable; failures are non-fatal (progressive
 // enhancement only).
-if (import.meta.env.PROD && 'serviceWorker' in navigator && !isPuterApp()) {
+if (!privateMode && import.meta.env.PROD && 'serviceWorker' in navigator && !isPuterApp()) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {})
   })

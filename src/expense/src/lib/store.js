@@ -21,6 +21,8 @@ import { uid, round2, extensionFor } from './util.js';
 import { monthKey, todayISO } from './dates.js';
 import { DEFAULT_OCR_MODEL } from './ocr.js';
 import { applyTransition, canTransition } from './reports.js';
+import { installPrivateCommands } from './private-commands.js';
+import { getStorage } from './storage.js';
 
 export const KV_KEYS = {
   settings: 'exp:settings:v1',
@@ -91,7 +93,7 @@ export function normalizeExpense(input, now = Date.now()) {
 }
 
 export class Store extends EventTarget {
-  constructor(getSdk = () => globalThis.puter) {
+  constructor(getSdk = getStorage, { draft = false } = {}) {
     super();
     this.getSdk = getSdk;
     this.settings = { ...DEFAULT_SETTINGS };
@@ -104,6 +106,7 @@ export class Store extends EventTarget {
     this._statements = null;
     this._queues = new Map();
     this._loading = new Map();
+    if (!draft) installPrivateCommands(this, sdk => new Store(() => sdk, { draft: true }));
   }
 
   get sdk() { return this.getSdk(); }
@@ -116,15 +119,23 @@ export class Store extends EventTarget {
 
   async init() {
     const { kv, auth } = this.sdk;
+    const privateMode = this.sdk.mode === 'private';
+    const authorized = privateMode ? await auth.getUser() : null;
     const [user, settings, categories, months, reports] = await Promise.all([
-      Promise.resolve().then(() => auth.getUser()).catch(() => null),
+      privateMode ? authorized : Promise.resolve().then(() => auth.getUser()).catch(() => null),
       kv.get(KV_KEYS.settings),
       kv.get(KV_KEYS.categories),
       kv.get(KV_KEYS.months),
       this._readJson(REPORTS_PATH, []),
     ]);
+    if (privateMode) {
+      if (settings !== null && (typeof settings !== 'object' || Array.isArray(settings))) throw new Error('Invalid settings document');
+      if (categories !== null && !Array.isArray(categories)) throw new Error('Invalid categories document');
+      if (months !== null && (!Array.isArray(months) || months.some(k => !/^\d{4}-(0[1-9]|1[0-2])$/.test(k)))) throw new Error('Invalid months document');
+    }
     this.user = user;
     this.settings = { ...DEFAULT_SETTINGS, ...(parseValue(settings, null) || {}) };
+    if (privateMode) this.settings.autoOcr = false;
     const cats = parseValue(categories, null);
     this.categories = Array.isArray(cats) && cats.length ? cats : DEFAULT_CATEGORIES.map((c) => ({ ...c }));
     this.reports = Array.isArray(reports) ? reports : [];
@@ -144,7 +155,8 @@ export class Store extends EventTarget {
     const prev = this._queues.get(path) || Promise.resolve();
     const next = prev.catch(() => {}).then(task);
     this._queues.set(path, next);
-    next.finally(() => { if (this._queues.get(path) === next) this._queues.delete(path); });
+    const cleanup = () => { if (this._queues.get(path) === next) this._queues.delete(path); };
+    next.then(cleanup, cleanup);
     return next;
   }
 
@@ -152,9 +164,16 @@ export class Store extends EventTarget {
     try {
       const blob = await this.sdk.fs.read(path);
       const text = typeof blob === 'string' ? blob : await blob.text();
-      if (!text.trim()) return fallback;
-      return JSON.parse(text);
-    } catch {
+      if (!text.trim() && this.sdk.mode !== 'private') return fallback;
+      const value = JSON.parse(text);
+      if (this.sdk.mode === 'private' && Array.isArray(fallback) && !Array.isArray(value)) throw new Error(`Invalid document: ${path}`);
+      return value;
+    } catch (err) {
+      if (this.sdk.mode === 'private' && err.code !== 'ENOENT') {
+        this.error ||= err;
+        this.dispatchEvent(new Event('storage-state'));
+        throw err;
+      }
       return fallback;
     }
   }
@@ -167,6 +186,7 @@ export class Store extends EventTarget {
 
   async updateSettings(patch) {
     this.settings = { ...this.settings, ...patch };
+    if (this.sdk.mode === 'private') this.settings.autoOcr = false;
     await this._kvSet(KV_KEYS.settings, this.settings);
     this.emit('settings');
     return this.settings;
@@ -314,9 +334,27 @@ export class Store extends EventTarget {
 
   /* ------------------------------------------------------------ receipts */
 
+  /** Private form save: upload immutable bytes before the metadata transaction. */
+  async saveExpenseWithReceipt({ id = null, data, file = null, removeReceipt = false }) {
+    if (this.sdk.mode !== 'private') throw new Error('Private receipt workflow only');
+    if (id) await this.loadAll();
+    const current = id ? this.getExpense(id) : null;
+    if (id && !current) throw new Error('Expense not found');
+    const patch = { ...data };
+    if (removeReceipt) Object.assign(patch, { receiptPath: null, receiptMime: null, receiptName: null });
+    if (file) Object.assign(patch, await this.saveReceipt(id, file));
+    const result = id ? await this.updateExpense(id, patch) : await this.addExpense(patch);
+    if ((file || removeReceipt) && current?.receiptPath) await this.deleteReceipt(current.receiptPath);
+    return result;
+  }
+
   async saveReceipt(expenseId, file) {
     const ext = extensionFor(file.type, file.name);
-    const path = `${RECEIPTS_DIR}/${expenseId}.${ext}`;
+    const privateMode = this.sdk.mode === 'private';
+    if (privateMode && (!(file instanceof Blob) || file.size > 10 * 1024 * 1024 || !/^(jpg|jpeg|png|webp|heic|gif|pdf|bin)$/.test(ext))) {
+      throw new Error('Receipt must be a supported image or PDF, at most 10 MiB');
+    }
+    const path = `${RECEIPTS_DIR}/${privateMode ? crypto.randomUUID() : expenseId}.${ext}`;
     await this.sdk.fs.write(path, file, { createMissingParents: true, overwrite: true });
     return { receiptPath: path, receiptMime: file.type || null, receiptName: file.name || `receipt.${ext}` };
   }
@@ -326,7 +364,13 @@ export class Store extends EventTarget {
   }
 
   async deleteReceipt(path) {
-    try { await this.sdk.fs.delete(path); } catch { /* already gone */ }
+    try { await this.sdk.fs.delete(path); } catch (err) {
+      if (this.sdk.mode === 'private' && err.code !== 'ENOENT') {
+        this.error ||= err;
+        this.dispatchEvent(new Event('storage-state'));
+        throw err;
+      }
+    }
   }
 
   /* ------------------------------------------------------------ reports */
@@ -500,6 +544,7 @@ export class Store extends EventTarget {
     const months = Object.keys(data.expenses || {}).sort().reverse();
     const stale = this.months.filter((k) => !months.includes(k));
     this.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+    if (this.sdk.mode === 'private') this.settings.autoOcr = false;
     this.categories = Array.isArray(data.categories) && data.categories.length ? data.categories : DEFAULT_CATEGORIES.map((c) => ({ ...c }));
     this.reports = Array.isArray(data.reports) ? data.reports : [];
     this.months = months;
@@ -524,13 +569,16 @@ export class Store extends EventTarget {
 
   /** Everything gone, including receipt files. */
   async wipeAll({ keepSettings = {} } = {}) {
+    const receipts = this.sdk.mode === 'private' ? await this.sdk.fs.readdir(`${RECEIPTS_DIR}/`) : null;
     await this.importAll({
       app: 'expenses', version: EXPORT_VERSION,
       settings: { ...DEFAULT_SETTINGS, theme: this.settings.theme, baseCurrency: this.settings.baseCurrency, ...keepSettings },
       categories: DEFAULT_CATEGORIES.map((c) => ({ ...c })),
       reports: [], expenses: {}, statements: [],
     });
-    await this.sdk.fs.delete(RECEIPTS_DIR).catch(() => {});
+    if (receipts) {
+      for (const receipt of receipts) await this.sdk.fs.delete(receipt.path);
+    } else await this.sdk.fs.delete(RECEIPTS_DIR).catch(() => {});
   }
 }
 

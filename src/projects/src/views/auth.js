@@ -1,3 +1,4 @@
+import { auth } from '../lib/storage.js';
 import { el } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
 import { appIcon } from '../ui/bits.js';
@@ -9,7 +10,7 @@ export function authView({ onSignedIn }) {
       cta.disabled = true;
       cta.textContent = 'Waiting for Puter…';
       try {
-        await puter.auth.signIn();
+        await auth.signIn();
         onSignedIn();
       } catch {
         cta.disabled = false;

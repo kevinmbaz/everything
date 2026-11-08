@@ -18,6 +18,8 @@
  * embedded views): the mirror simply reports that it has nothing.
  */
 
+import { isPrivateStorage } from './storage.js';
+
 const DB_NAME = 'pm-mirror';
 const DB_VERSION = 1;
 const STORE = 'kv';
@@ -25,6 +27,7 @@ const STORE = 'kv';
 let dbPromise = null;
 
 function hasIndexedDB() {
+  if (isPrivateStorage) return false;
   try {
     return typeof indexedDB !== 'undefined' && indexedDB !== null;
   } catch {

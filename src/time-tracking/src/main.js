@@ -9,6 +9,8 @@ import { toast } from './ui/toast.js';
 import { shouldOnboard, openOnboarding } from './ui/onboarding.js';
 import { initUrlActions } from './ui/actions.js';
 import { withoutAction } from './lib/urlaction.js';
+import { mountPrivateStatus } from './ui/private-status.js';
+import { isPrivateStorage } from './lib/storage.js';
 import { authView } from './views/auth.js';
 
 const appRoot = document.getElementById('app');
@@ -36,6 +38,16 @@ function showError(title, message, onRetry) {
 }
 
 async function start() {
+  if (isPrivateStorage) {
+    try {
+      const { preparePrivateBrowser } = await import('../../../private_storage/browser.mjs');
+      await preparePrivateBrowser({ cachePrefixes: ['hourly-'] });
+      await boot();
+    } catch (error) {
+      showError('Private storage unavailable', 'Could not securely connect to Jetson storage. No browser copy was opened.', () => location.reload());
+    }
+    return;
+  }
   if (typeof puter === 'undefined') {
     // The SDK could not load. If this device holds a signed-in user's
     // local mirror, boot from it: reads come from the cache, writes queue,
@@ -74,7 +86,9 @@ async function boot() {
     await store.init();
   } catch (err) {
     console.error(err);
-    if (!navigator.onLine) {
+    if (isPrivateStorage) {
+      showError('Private storage unavailable', 'Jetson authentication or data loading failed. No offline fallback is used.', () => location.reload());
+    } else if (!navigator.onLine) {
       showError('You are offline', 'This device has no local copy of your data yet. Connect once and it will be available offline from then on.', () => location.reload());
     } else {
       showError('Could not load your data', 'Something went wrong talking to your Puter cloud.', () => location.reload());
@@ -105,6 +119,10 @@ async function boot() {
   // toast.
   initUrlActions();
   setupOfflineBanner();
+  if (isPrivateStorage) {
+    store.maybeAutoBackup().catch(() => toast('Jetson snapshot failed; not saved', { icon: 'wifiOff' }));
+    return;
+  }
   // Automatic safety snapshot (weekly by default), silent on any failure:
   // offline or a flaky write just means the next open tries again.
   store.maybeAutoBackup().catch(() => {});
@@ -181,6 +199,7 @@ let updateOfflineBanner = () => {};
  * writes would look saved to the cloud while living only on this device.
  */
 function setupOfflineBanner() {
+  if (isPrivateStorage) { mountPrivateStatus(store); return; }
   let banner = null;
   let shown = null; // the message on screen, so a no-op update stays quiet
   const update = () => {
@@ -222,7 +241,7 @@ function setupOfflineBanner() {
    worker would serve stale caches over the dev server. */
 const isDevHost = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(location.hostname)
   || location.hostname.endsWith('.localhost');
-if ('serviceWorker' in navigator && !isDevHost) {
+if (!isPrivateStorage && 'serviceWorker' in navigator && !isDevHost) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   });

@@ -45,6 +45,7 @@ export function openCapture({ onSaved = null } = {}) {
   }, 'Enter an expense without a receipt');
 
   const body = el('div', {}, fileInput, cameraInput, drop, manual);
+  if (store.sdk?.mode === 'private') body.prepend(el('p', {}, 'Manual entry — cloud OCR is unavailable in private mode. Receipt bytes stay on Jetson.'));
   const modal = openModal({ title: 'Capture receipt', content: body });
 
   // Pasting an image from the clipboard also works.
@@ -104,7 +105,7 @@ function captureOne(file, { label, onSaved }) {
     };
     cancel.onclick = () => { aborted = true; modal.close(); };
 
-    if (!store.settings.autoOcr) { skip.click(); return; }
+    if (store.sdk?.mode === 'private' || !store.settings.autoOcr) { skip.click(); return; }
 
     runReceiptOcr(file, { categories: store.categories, baseCurrency: store.settings.baseCurrency, model: store.settings.ocrModel })
       .then(({ result, source }) => {

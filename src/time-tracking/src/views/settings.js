@@ -9,6 +9,8 @@ import { field, fieldError, switchField, rateHistoryLine, RATE_ERROR } from '../
 import { store, rateAt, withRateFrom } from '../lib/store.js';
 import { entriesToCSV } from '../lib/csv.js';
 import { wipeSampleData } from '../lib/sample.js';
+import { isPrivateStorage } from '../lib/storage.js';
+import { trackPrivateDraft } from '../ui/private-status.js';
 import { offline } from '../lib/offline.js';
 import { openOnboarding } from '../ui/onboarding.js';
 import { openImporter } from '../ui/importer.js';
@@ -22,6 +24,7 @@ import { todayISO, fmtDay } from '../lib/time.js';
 
 /** Confirm-and-sign-out, shared by Settings and the sidebar user block. */
 export async function confirmSignOut() {
+  if (isPrivateStorage) return;
   const pending = store.pendingWrites();
   const ok = await confirmDialog({
     title: 'Sign out?',
@@ -52,8 +55,19 @@ const TARGET_ERROR = 'Enter the target in hours, like 30';
    sheet through the same phrasing the rate errors use. */
 const TAX_ERROR = 'Enter the tax rate as a number, like 19';
 
+// Private drafts have no disk/browser mirror. Keep the actual controls
+// reachable on return to Settings, including invalid or rejected edits.
+let retainedPrivateSettings = null;
+
 export function settingsView() {
+  if (store.privateMode && retainedPrivateSettings) {
+    const retained = retainedPrivateSettings;
+    retainedPrivateSettings = null;
+    retained.resume();
+    return retained.root;
+  }
   const root = el('div.view');
+  const draft = trackPrivateDraft(root, store);
 
   root.append(
     el('div.page-head', {},
@@ -71,10 +85,10 @@ export function settingsView() {
       el('span.user-avatar', {}, username.charAt(0).toUpperCase()),
       el('div.grow', {},
         el('div.title', {}, username),
-        el('div.sub', {}, 'Synced with your Puter cloud')
+        el('div.sub', {}, isPrivateStorage ? 'Private Jetson storage · Tailscale owner session' : 'Synced with your Puter cloud')
       ),
       // Inside Puter, the platform owns the session; no sign-out offered.
-      !isPuterApp() && el('button.btn.btn-ghost', { onclick: confirmSignOut }, 'Sign out')
+      !isPrivateStorage && !isPuterApp() && el('button.btn.btn-ghost', { onclick: confirmSignOut }, 'Sign out')
     )
   ));
 
@@ -108,7 +122,15 @@ export function settingsView() {
     if (currentTheme() !== shownTheme) keepFocus(themeSeg, renderTheme);
   };
   store.addEventListener('change', onThemeChange);
-  root.destroy = () => store.removeEventListener('change', onThemeChange);
+  root.destroy = () => {
+    store.removeEventListener('change', onThemeChange);
+    if (store.privateMode && draft.capture().size) {
+      retainedPrivateSettings = { root, resume: () => {
+        store.addEventListener('change', onThemeChange);
+        onThemeChange();
+      } };
+    } else draft.dispose();
+  };
   root.append(group('Appearance', themeSeg));
 
   /* --- Billing --- */
@@ -219,8 +241,13 @@ export function settingsView() {
   ));
 
   async function save(patch, { quiet = false } = {}) {
+    const generation = draft.capture(Object.keys(patch));
     try {
       await store.updateSettings(patch);
+      if (draft.acknowledge(generation) && retainedPrivateSettings?.root === root) {
+        retainedPrivateSettings = null;
+        draft.dispose();
+      }
       if (!quiet) toast('Saved');
     } catch (err) {
       console.error(err);
@@ -230,6 +257,7 @@ export function settingsView() {
 
   /* --- Invoicing --- */
   const bizText = (key, node) => {
+    node.dataset.storageKey = key;
     node.addEventListener('input', debounce(() => save({ [key]: node.value.trim() }, { quiet: true }), 600));
     return node;
   };
@@ -371,7 +399,7 @@ export function settingsView() {
       el('span.field-label', {}, 'Logo'),
       logoBox,
       el('p.field-hint', {},
-        'Stored in your own Puter files and printed in the invoice header at a fixed height. Replacing or removing it leaves invoices you already issued exactly as they were.')
+        `${isPrivateStorage ? 'Stored on Jetson' : 'Stored in your own Puter files'} and printed in the invoice header at a fixed height. Replacing or removing it leaves invoices you already issued exactly as they were.`)
     ),
     logoInput
   ));
@@ -485,7 +513,7 @@ export function settingsView() {
   const backupList = el('div.settings-list');
   function renderBackups() {
     clear(backupList);
-    backupList.append(settingsRow('cloud', 'Back up now', 'Save a snapshot to your Puter cloud right away', async () => {
+    backupList.append(settingsRow('cloud', 'Back up now', isPrivateStorage ? 'Save a JSON snapshot to Jetson (logo bytes excluded)' : 'Save a snapshot to your Puter cloud right away', async () => {
       try {
         const b = await store.writeBackup();
         toast(`Backed up ${prettySize(b.size)}`, { icon: 'cloud' });
@@ -537,7 +565,7 @@ export function settingsView() {
 
   root.append(group('Backups',
     field('Automatic backups', backupInterval, {
-      hint: `Saves a full snapshot into your Puter cloud when you open the app, keeping the last 8. Restore or download any of them below.`,
+      hint: isPrivateStorage ? 'Jetson JSON snapshots keep the last 8. Logo bytes are excluded; use full server database backups for complete protection.' : `Saves a full snapshot into your Puter cloud when you open the app, keeping the last 8. Restore or download any of them below.`,
     }),
     backupList
   ));
@@ -574,7 +602,7 @@ export function settingsView() {
       // BOM: Excel needs it to read UTF-8 CSVs correctly.
       downloadFile('\ufeff' + entriesToCSV(entries, store), `hourly-all-${todayISO()}.csv`, 'text/csv;charset=utf-8');
     }),
-    settingsRow('download', 'Download backup', 'A full JSON backup of clients, projects, and entries', async () => {
+    settingsRow('download', 'Download backup', 'JSON backup of clients, projects, invoices and entries; logo bytes excluded', async () => {
       const data = await exportData();
       if (!data) return;
       downloadFile(JSON.stringify(data, null, 2), `hourly-backup-${todayISO()}.json`, 'application/json');
@@ -627,7 +655,7 @@ export function settingsView() {
   /* --- About --- */
   root.append(group('About',
     el('p.about-text', {},
-      `Hourly stores everything in your own Puter account. Amounts are shown in ${store.settings.currency}. `,
+      isPrivateStorage ? `Hourly stores data on Jetson. No browser mirror or offline replay. Amounts are shown in ${store.settings.currency}. ` : `Hourly stores everything in your own Puter account. Amounts are shown in ${store.settings.currency}. `,
       'Built with ', el('a', { href: 'https://developer.puter.com', target: '_blank', rel: 'noopener' }, 'Puter'), '.')
   ));
 
@@ -649,5 +677,12 @@ export function settingsView() {
     );
   }
 
+  for (const [key, node] of Object.entries({ currency, defaultRate: rate,
+    rounding, weekStart, weeklyTargetHours: weeklyTarget, weeklyTargetKind, taxRate,
+    notifyNative: notify.input, businessLogo: logoInput,
+    paymentTermsDays: paymentTerms, longTimerHours: longTimer,
+    idleGapMinutes: idleGap, dailyNudgeHour: nudge, unbilledReminderDay: unbilledDay,
+    unbilledAgeDays: unbilledAge, backupInterval })) node.dataset.storageKey = key;
+  rateFrom.dataset.storageKey = 'defaultRate';
   return root;
 }

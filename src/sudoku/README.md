@@ -110,6 +110,15 @@ circle Android may crop it to.
 | Ctrl/Cmd + Shift + Z   | Redo                                    |
 | Escape                 | Dismiss the hint                        |
 
+## Explicit private storage
+
+`VITE_PRIVATE_STORAGE=1 npm run build` selects a separate authenticated private
+build in `dist-private/`. It uses one validated `sudoku:state:v1` document for the
+snapshot, settings, statistics and daily streak; the normal Puter build stays
+separate. See [PRIVATE-STORAGE.md](PRIVATE-STORAGE.md) for the schema, failure and
+recovery behavior, serializer omissions, browser selectors and rollout gates.
+There is no automatic import of existing browser/Puter progress or offline replay.
+
 ## The Puter account
 
 Everything works signed out; the whole game runs from localStorage. Signing in
@@ -146,7 +155,8 @@ to the shell, so the app shows who is signed in and offers no sign-out.
 npm test
 ```
 
-333 tests. The ones worth knowing about:
+387 tests across 20 files (333 original tests plus 54 private-mode and regression
+checks). The ones worth knowing about:
 
 - **Technique soundness.** Every step the ladder takes, on every difficulty, is
   checked against the puzzle's unique solution: a placement must match it, and

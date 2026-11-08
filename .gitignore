@@ -9,6 +9,7 @@ node_modules/
 
 # Build output and tooling caches
 dist/
+dist-private/
 build/
 .next/
 .nuxt/

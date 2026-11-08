@@ -16,6 +16,8 @@
  * templates (src/lib/message.js).
  */
 
+import { isPrivate } from './storage.js';
+
 /** The one shared, app-owned worker (see src/workers/email-worker.js). */
 export const EMAIL_WORKER_URL = 'https://invoicing-email.puter.work';
 
@@ -32,7 +34,7 @@ export const MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024;
 export const MAX_SUBJECT_CHARS = 200;
 export const MAX_BODY_CHARS = 20_000;
 
-const puterOf = () => (typeof puter !== 'undefined' ? puter : null);
+const puterOf = () => (!isPrivate && typeof puter !== 'undefined' ? puter : null);
 
 /**
  * Whether this device can send at all. Sending needs the worker bridge — it is

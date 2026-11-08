@@ -2,6 +2,7 @@ import './styles/index.css';
 import { el } from './lib/dom.js';
 import { icon } from './ui/icons.js';
 import { store } from './lib/store.js';
+import { isPrivateStorage } from './lib/storage.js';
 import { applyTheme } from './ui/theme.js';
 import { mountShell } from './ui/shell.js';
 import { shouldOnboard, openOnboarding } from './ui/onboarding.js';
@@ -103,6 +104,16 @@ function mountSharedViewer() {
 }
 
 async function start() {
+  if (isPrivateStorage) {
+    try {
+      const { preparePrivateBrowser } = await import('../../../private_storage/browser.mjs');
+      await preparePrivateBrowser({ cachePrefixes: ['tasks-'] });
+      await boot();
+    } catch (err) {
+      showError('Could not open private Tasks', err.message || 'Jetson storage is unavailable. No offline copy is used.', () => location.reload());
+    }
+    return;
+  }
   if (location.hash.startsWith('#/shared')) {
     mountSharedViewer();
     return;
@@ -138,7 +149,9 @@ async function boot() {
     await store.init();
   } catch (err) {
     console.error(err);
-    if (!navigator.onLine) {
+    if (isPrivateStorage) {
+      showError('Could not load private Tasks', 'Jetson storage or your authorized session is unavailable. No browser copy or Puter fallback is used.', () => location.reload());
+    } else if (!navigator.onLine) {
       showError('You are offline', 'This device has no local copy of your tasks yet. Connect once and they will be available offline from then on.', () => location.reload());
     } else {
       showError('Could not load your tasks', 'Something went wrong talking to your Puter cloud.', () => location.reload());
@@ -161,7 +174,10 @@ async function boot() {
     try { maybeNotifyDue(store); } catch {}
     try { catchUpMissedReminders(store); } catch {}
     try { scheduleTaskReminders(store); } catch {}
-    store.archiveOldCompleted().catch(() => {});
+    store.archiveOldCompleted().catch(() => {
+      if (isPrivateStorage) toast('Archive not saved. Keep this tab open and copy unsaved work before reopening.', { duration: 10000 });
+    });
+    if (isPrivateStorage) return;
     store.syncShares().catch(() => {});
     store.syncCollab().catch(() => {});
     // Lists shared by username: live updates, new-share notifications, and
@@ -179,6 +195,8 @@ async function boot() {
     try { catchUpMissedReminders(store); } catch {}
     try { scheduleTaskReminders(store); } catch {}
   });
+
+  if (isPrivateStorage) return; // No remote merge, replay or collaboration polling
 
   // Another device may have written while this tab was in the background:
   // refetch (and merge) whenever the tab comes back into view. The store
@@ -213,6 +231,36 @@ async function boot() {
  * that second case used to be completely silent.
  */
 function setupOfflineBanner() {
+  if (isPrivateStorage) {
+    const banner = el('div.offline-banner', { role: 'status' });
+    document.body.append(banner);
+    const hasQuickDraft = () => !!document.getElementById('quick-add-input')?.value.trim();
+    const update = () => {
+      const error = store.privateError || store.cloud.error || store.cloud.conflict;
+      const conflict = store.cloud.conflict || /conflict/i.test(error?.code || '');
+      banner.textContent = conflict
+        ? 'Private Jetson storage — Conflict — Copy unsaved work before reopening. No automatic reload or overwrite.'
+        : error
+        ? 'Private Jetson storage — Save not confirmed. Copy unsaved work before reopening. No automatic retry.'
+        : store.pendingWrites() || store.cloud.dirty || hasQuickDraft()
+          ? 'Private Jetson storage — Unsaved changes. Keep this tab open.'
+          : !navigator.onLine ? 'Private Jetson storage — Offline. Writes require a connection.'
+            : 'Private Jetson storage — Saved to Jetson. Sharing, public feeds and collaboration unavailable.';
+    };
+    window.addEventListener('beforeunload', event => {
+      if (store.pendingWrites() || store.cloud.dirty || store.privateError || store.cloud.error || hasQuickDraft()) {
+        event.preventDefault(); event.returnValue = '';
+      }
+    });
+    store.addEventListener('sync-state', update);
+    store.cloud.events.addEventListener('state', update);
+    document.addEventListener('input', update);
+    window.addEventListener('hashchange', update);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    update();
+    return;
+  }
   let banner = null;
   let shownFor = null;
 
@@ -240,5 +288,5 @@ function setupOfflineBanner() {
 // Dev-only handle for the mock harness and console debugging.
 if (import.meta.env?.DEV) window.__tasks = { store };
 
-registerServiceWorker();
+if (!isPrivateStorage) registerServiceWorker();
 start();

@@ -49,10 +49,13 @@ import {
   toggleNote,
   undo,
 } from './game/state.js';
-import { resolveTheme } from './game/settings.js';
+import { DEFAULT_SETTINGS, resolveTheme } from './game/settings.js';
+import { decode, encode } from './game/serialize.js';
 import { createTimer, formatDuration } from './game/timer.js';
 import { STAT_DIFFICULTIES, dailyStreakOn, emptyStats, recordSolved, recordStart } from './game/stats.js';
-import {
+const PRIVATE_MODE = import.meta.env.VITE_PRIVATE_STORAGE === '1';
+const privateState = PRIVATE_MODE ? (await import('./game/private-state.js')).createPrivateSudoku() : null;
+const {
   clearSaveEverywhere,
   loadSavedGame,
   loadSettings,
@@ -64,8 +67,8 @@ import {
   saveStats,
   syncSavedGame,
   syncStats,
-} from './game/persistence.js';
-import * as account from './net/puter.js';
+} = PRIVATE_MODE ? {} : await import('./game/persistence.js');
+const account = PRIVATE_MODE ? null : await import('./net/puter.js');
 import { createBoardView } from './ui/boardView.js';
 import { createKeypad } from './ui/keypad.js';
 
@@ -157,8 +160,8 @@ const el = {
 const state = {
   game: null,
   timer: createTimer(),
-  settings: loadSettings(),
-  stats: loadStats(),
+  settings: PRIVATE_MODE ? { ...DEFAULT_SETTINGS } : loadSettings(),
+  stats: PRIVATE_MODE ? emptyStats() : loadStats(),
   /** Centre cell: the shortest average distance to anywhere else. */
   selected: 40,
   notesMode: false,
@@ -214,8 +217,9 @@ darkQuery.addEventListener('change', () => {
 
 for (const button of document.querySelectorAll('[data-theme-choice]')) {
   button.addEventListener('click', () => {
+    if (PRIVATE_MODE && (!privateState.ready || privateState.error)) return;
     state.settings.theme = button.dataset.themeChoice;
-    saveSettings(state.settings);
+    if (PRIVATE_MODE) persistPrivate(); else saveSettings(state.settings);
     applyTheme();
   });
 }
@@ -383,12 +387,43 @@ function formatDate(isoDate) {
 let localSaveTimer;
 let cloudSaveTimer;
 
+/** Capture the entire private draft synchronously, before any queued I/O. */
+function capturePrivate() {
+  return privateState.capture(privateDraft());
+}
+
+function privateDraft() {
+  const draft = privateState.draft;
+  if (state.game) state.game.elapsedMs = state.timer.elapsedMs;
+  return { ...draft, settings: state.settings, stats: state.stats,
+    snapshot: state.game ? encode(state.game) : null };
+}
+
+function privateFailure(error) {
+  state.timer.pause();
+  for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
+  // Do not leave a generation/pause veil hiding the retained draft.
+  if (state.game) hideVeil();
+  $('app').inert = true;
+  $('private-save-status').textContent = `Not saved: ${error.message}. Keep this tab open. Download the draft before manually reloading; no automatic retry.`;
+}
+
+async function persistPrivate() {
+  if (!privateState.ready || privateState.error) return false;
+  try {
+    capturePrivate();
+    await privateState.save();
+    return true;
+  } catch (error) { privateFailure(error); return false; }
+}
+
 /**
  * Persist the game in progress. localStorage is written on a short debounce
  * because it is cheap and synchronous; the account is written on a much longer
  * one, since every placement does not need a network round trip.
  */
 function scheduleSave() {
+  if (PRIVATE_MODE) { if (state.game && !state.solved) persistPrivate(); return; }
   if (!state.game || state.solved) return;
   cancelScheduledSaves();
   localSaveTimer = setTimeout(() => {
@@ -414,6 +449,7 @@ function cancelScheduledSaves() {
 
 /** Write through immediately, for when the page is going away. */
 function flushSave() {
+  if (PRIVATE_MODE) { if (state.game && !state.solved) persistPrivate(); return; }
   clearTimeout(localSaveTimer);
   if (state.game && !state.solved) {
     state.game.elapsedMs = state.timer.elapsedMs;
@@ -459,6 +495,7 @@ const hideVeil = () => {
  * @param {{difficulty: string, daily?: string|null}} options
  */
 async function startPuzzle({ difficulty, daily = null }) {
+  if (PRIVATE_MODE && (!privateState.ready || privateState.error)) return;
   if (state.generating) return;
   state.generating = true;
   // The buttons that would start a second build, disabled for as long as this
@@ -482,6 +519,7 @@ async function startPuzzle({ difficulty, daily = null }) {
 
   try {
     const result = await requestPuzzle({ difficulty, daily });
+    if (PRIVATE_MODE && privateState.error) return;
     const game = createGame({
       puzzle: result.puzzle,
       solution: result.solution,
@@ -496,6 +534,7 @@ async function startPuzzle({ difficulty, daily = null }) {
         `Use the arrow keys to move and 1 to 9 to enter a digit.`,
     );
   } catch {
+    if (PRIVATE_MODE && privateState.error) return;
     toast('Could not build a puzzle. Please try again.');
     // Give the board back exactly as it was, running clock included.
     if (wasPaused) {
@@ -531,10 +570,15 @@ function adoptGame(game, { fresh = false } = {}) {
   hideVeil();
 
   if (fresh) {
-    state.stats = recordStart(state.stats, game.difficulty);
-    saveStats(state.stats);
-    if (state.signedIn) pushStats(state.stats);
-    saveGame(game);
+    if (PRIVATE_MODE) {
+      state.stats = privateState.startGame(game).stats;
+      persistPrivate();
+    } else {
+      state.stats = recordStart(state.stats, game.difficulty);
+      saveStats(state.stats);
+      if (state.signedIn) pushStats(state.stats);
+      saveGame(game);
+    }
   }
   render();
   boardView.focusCell(state.selected);
@@ -666,8 +710,8 @@ function afterMove() {
   // The position has moved on, so the next hint is a new one to account for.
   state.chargedHint = null;
   render();
-  scheduleSave();
   if (!state.solved && isSolved(state.game)) finishGame();
+  else scheduleSave();
 }
 
 /* ------------------------------------------------------------------ */
@@ -692,6 +736,7 @@ function showHint() {
   if (key && key !== state.chargedHint) {
     game.hintsUsed++;
     state.chargedHint = key;
+    if (PRIVATE_MODE) scheduleSave();
   }
   state.hint = hint;
   if (hint.kind === 'mistake' && hint.cells.length) state.selected = hint.cells[0];
@@ -765,6 +810,7 @@ function showPauseVeil() {
 }
 
 function setPaused(paused) {
+  if (PRIVATE_MODE && (!privateState.ready || privateState.error)) return;
   if (state.solved || state.generating || !state.game) return;
   if (paused === state.paused) return;
   state.paused = paused;
@@ -774,7 +820,7 @@ function setPaused(paused) {
     showPauseVeil();
     announce('Paused');
   } else {
-    state.timer.start();
+    if (!document.hidden) state.timer.start();
     hideVeil();
     boardView.focusCell(state.selected);
     announce('Resumed');
@@ -785,21 +831,27 @@ function setPaused(paused) {
 // A backgrounded tab stops getting timer callbacks but keeps its wall clock, so
 // the clock is banked on the way out rather than left running unattended.
 document.addEventListener('visibilitychange', () => {
+  if (PRIVATE_MODE && (!privateState.ready || privateState.error)) return;
   if (document.hidden && !state.solved && state.game) {
     state.timer.pause();
     flushSave();
-  } else if (!document.hidden && !state.paused && !state.solved && state.game) {
+  } else if (!document.hidden && !isVeiled() && !state.solved && state.game) {
     state.timer.start();
   }
 });
 
 window.addEventListener('pagehide', flushSave);
+if (PRIVATE_MODE) window.addEventListener('beforeunload', event => {
+  if (privateState.ready && state.game && !state.solved && Math.round(state.timer.elapsedMs) > (privateState.draft.snapshot?.elapsedMs ?? 0)) privateState.markDirty();
+  if (privateState.dirty) { event.preventDefault(); event.returnValue = ''; }
+});
 
 /* ------------------------------------------------------------------ */
 /* Finishing                                                           */
 /* ------------------------------------------------------------------ */
 
 function finishGame() {
+  if (state.solved) return;
   const game = state.game;
   state.solved = true;
   state.hint = null;
@@ -808,19 +860,22 @@ function finishGame() {
 
   const flawless = isFlawless(game);
   const previousBest = state.stats.byDifficulty[game.difficulty]?.bestMs ?? null;
-  state.stats = recordSolved(state.stats, {
-    difficulty: game.difficulty,
-    elapsedMs: game.elapsedMs,
-    flawless,
-    dailyDate: game.daily,
-  });
-  saveStats(state.stats);
-  // Before clearing, not after: a debounced write still in flight would put the
-  // finished board straight back and it would be restored as an unfinished game.
-  cancelScheduledSaves();
-  clearSaveEverywhere();
-  if (state.signedIn) pushStats(state.stats);
-
+  if (PRIVATE_MODE) {
+    state.stats = privateState.finishGame(game).stats;
+    persistPrivate();
+  } else {
+    state.stats = recordSolved(state.stats, {
+      difficulty: game.difficulty,
+      elapsedMs: game.elapsedMs,
+      flawless,
+      dailyDate: game.daily,
+    });
+    saveStats(state.stats);
+    // Cancel before clearing so a queued default-mode save cannot resurrect it.
+    cancelScheduledSaves();
+    clearSaveEverywhere();
+    if (state.signedIn) pushStats(state.stats);
+  }
   const isRecord = previousBest === null || game.elapsedMs < previousBest;
   render();
   showResult({ game, flawless, isRecord });
@@ -954,8 +1009,9 @@ function openSettings() {
     label.append(input, track);
 
     input.addEventListener('change', () => {
+      if (PRIVATE_MODE && privateState.error) return;
       state.settings[option.key] = input.checked;
-      saveSettings(state.settings);
+      if (PRIVATE_MODE) persistPrivate(); else saveSettings(state.settings);
       render();
     });
 
@@ -970,6 +1026,7 @@ function openSettings() {
 /* ------------------------------------------------------------------ */
 
 function renderAccount() {
+  if (PRIVATE_MODE) { el.accountBtn.hidden = true; return; }
   if (!account.isAvailable()) {
     el.accountBtn.hidden = true;
     return;
@@ -1000,6 +1057,7 @@ function renderAccount() {
 }
 
 async function onAccountClick() {
+  if (PRIVATE_MODE) return;
   if (!account.isAvailable() || account.isHostedSession()) return;
 
   if (!state.signedIn) {
@@ -1066,7 +1124,7 @@ async function syncEverything({ adoptCloudGame = false } = {}) {
   // on another device, which was then never picked up and was overwritten in the
   // account instead. Offered as "no local game", the account's game wins.
   const { game, source } = await syncSavedGame(hasProgress(state.game) ? state.game : null);
-  if (source === 'cloud' && game && !state.interacted) {
+  if (source === 'cloud' && game && !state.interacted && !isVeiled()) {
     adoptGame(game);
     return true;
   }
@@ -1110,6 +1168,7 @@ function moveSelection(dRow, dCol) {
 }
 
 document.addEventListener('keydown', (event) => {
+  if (PRIVATE_MODE && (!privateState.ready || privateState.error)) return;
   // Leave the platform's own handling alone inside dialogs and form controls.
   if (document.querySelector('dialog[open]')) return;
   const tag = event.target?.tagName;
@@ -1252,11 +1311,19 @@ function wire() {
       confirmLabel: 'Reset',
     });
     if (ok) {
+      if (PRIVATE_MODE && privateState.error) return;
       state.stats = emptyStats();
-      saveStats(state.stats);
-      if (state.signedIn) await pushStats(state.stats);
-      announce('Records reset.');
+      if (PRIVATE_MODE) {
+        const saved = await persistPrivate();
+        announce(saved ? 'Records reset and saved to Jetson.' : 'Records reset in this draft only; not saved.');
+      } else {
+        saveStats(state.stats);
+        if (state.signedIn) await pushStats(state.stats);
+        announce('Records reset.');
+      }
     }
+    // A failed private reset must leave recovery/download controls reachable.
+    if (PRIVATE_MODE && privateState.error) return;
     // Either way, back to the records: cancelling should not cost the player the
     // dialog they were reading, and after a reset the emptied table is the
     // clearest confirmation there is. A toast would sit behind the backdrop.
@@ -1292,6 +1359,49 @@ function buildDifficultySelect() {
 
 async function main() {
   mountIcons();
+  let privateDocument;
+  if (PRIVATE_MODE) {
+    const app = $('app');
+    app.inert = true;
+    const panel = document.createElement('section');
+    panel.id = 'private-storage-panel';
+    panel.className = 'card';
+    const status = document.createElement('p');
+    status.id = 'private-save-status';
+    status.setAttribute('role', 'status');
+    status.textContent = 'Loading private Sudoku…';
+    panel.append(status);
+    app.before(panel);
+    privateState.events.addEventListener('state', () => {
+      if (privateState.error) { privateFailure(privateState.error); return; }
+      status.textContent = privateState.dirty ? 'Unsaved changes — keep this tab open until saved.' : 'Saved to Jetson';
+    });
+    const download = document.createElement('button');
+    download.id = 'private-export';
+    download.className = 'btn';
+    download.textContent = 'Download draft (not a server save)';
+    download.disabled = true;
+    download.addEventListener('click', () => {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(privateDraft(), null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'sudoku-private-draft.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    panel.append(download);
+    try {
+      privateDocument = await privateState.load();
+      state.settings = privateDocument.settings;
+      state.stats = privateDocument.stats;
+      download.disabled = false;
+      status.textContent = 'Saved to Jetson';
+      app.inert = false;
+    } catch (error) {
+      status.textContent = `Private Sudoku could not load: ${error.message}. No puzzle was generated or overwritten. Reload manually after resolving the problem.`;
+      return;
+    }
+  }
   applyTheme();
 
   boardView = createBoardView(el.board, { onSelect: select });
@@ -1301,7 +1411,7 @@ async function main() {
   wire();
   renderAccount();
 
-  const saved = loadSavedGame();
+  const saved = PRIVATE_MODE ? decode(privateDocument.snapshot) : loadSavedGame();
   if (saved) {
     state.nextDifficulty = isDifficulty(saved.difficulty) ? saved.difficulty : 'medium';
     el.difficultySelect.value = state.nextDifficulty;
@@ -1317,11 +1427,18 @@ async function main() {
   // before the account work below, which is two network round trips: behind
   // them, a slow connection left the clock frozen on a board already in play.
   setInterval(() => {
-    if (state.game && !state.paused && !state.solved && !document.hidden) renderClock();
+    if (state.game && !state.paused && !state.solved && !document.hidden) {
+      renderClock();
+      if (PRIVATE_MODE && !privateState.error) privateState.markDirty();
+    }
   }, 500);
+  if (PRIVATE_MODE) setInterval(() => {
+    if (state.game && !state.paused && !state.solved && !document.hidden && !privateState.error) persistPrivate();
+  }, 5000);
 
   // The account is a bonus, so it is resolved after the board is playable and
   // never blocks it.
+  if (PRIVATE_MODE) { render(); return; }
   await refreshAccount();
   if (await syncEverything({ adoptCloudGame: !state.interacted })) {
     toast('Picked up the puzzle you left on another device.');
@@ -1329,4 +1446,4 @@ async function main() {
   render();
 }
 
-main();
+export const boot = main();

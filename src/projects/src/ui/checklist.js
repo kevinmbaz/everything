@@ -1,7 +1,7 @@
+import { persistInput } from '../lib/private-browser.js';
 import { el, clear, requireValue } from '../lib/dom.js';
 import { icon } from './icons.js';
 import { store, taskChecklist, checklistProgress } from '../lib/store.js';
-import { debounce } from '../lib/util.js';
 import { progressBar } from './bits.js';
 import { toast } from './toast.js';
 import { initListReorder } from './reorder.js';
@@ -85,7 +85,7 @@ export function checklistSection({ projectId, task }) {
       maxLength: 200,
       'aria-label': `Item: ${item.text}`,
       className: `checklist-text${item.done ? ' done' : ''}`,
-      oninput: debounce(() => {
+      oninput: persistInput(() => {
         const v = text.value.trim();
         // An emptied field is a mistake, not a request for a blank item;
         // the last non-empty text stays until something replaces it.

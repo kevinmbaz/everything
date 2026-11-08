@@ -3,17 +3,6 @@ import './styles/layout.css';
 import './styles/card.css';
 import './styles/animations.css';
 
-// Offline support (public/sw.js). Production-only: a service worker on the
-// dev server would turn every subsequent change into a stale-cache mystery,
-// since it would start intercepting fetches for files Vite hasn't rebuilt
-// yet. .catch(() => {}) matters -- registration rejects on file:// and in
-// some private-browsing modes, and an unhandled rejection here is a bug
-// report waiting to happen for something that isn't actually a bug.
-if (import.meta.env.PROD && 'serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
-  });
-}
 
 import {
   MODES, DEFAULT_MODE, findMode, modeOf, dealMode, rulesFor, serialize, deserialize,
@@ -29,6 +18,15 @@ import {
 } from './services/stats.js';
 import * as cloud from './services/puter-sync.js';
 import { shouldAdoptRemote } from './services/save-arbitration.js';
+
+// Entry waits for private worker/auth/hydration before mounting any gameplay.
+// The default branch retains the original browser/Puter persistence path.
+export function startApp(privateSession = null) {
+if (!privateSession && import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
 
 // Start the cardmeister download immediately rather than waiting for the
 // first rich-face build mid-render, so the opening deal doesn't paint as
@@ -48,12 +46,12 @@ const modeMenu = document.getElementById('modeMenu');
 const modeLabelEl = document.getElementById('modeLabel');
 const toastEl = document.getElementById('toast');
 
-const modePref = loadModePref();
-let game = dealMode(findMode(modePref) ? modePref : DEFAULT_MODE);
-let stats = loadLocalStats();
+const modePref = privateSession ? null : loadModePref();
+let game = privateSession ? privateSession.game : dealMode(findMode(modePref) ? modePref : DEFAULT_MODE);
+let stats = privateSession ? privateSession.stats : loadLocalStats();
 let countedThisGame = false;
 // This browser's share of the Vegas bank (see stats.js mergeVegas).
-const DEVICE_ID = deviceId();
+const DEVICE_ID = privateSession ? null : deviceId();
 let signedIn = false;
 // True only once a load-time cloud pull of the save has actually succeeded.
 // A failed (or never-attempted) pull leaves this false, so we never push our
@@ -70,7 +68,7 @@ let playerOwnsBoard = false;
 
 const animator = createAnimator({ boardEl });
 
-const rules = () => rulesFor(game);
+const rules = () => privateSession ? privateSession.rules : rulesFor(game);
 
 // U+2212 rather than a hyphen, so -$52 reads as a minus sign.
 function money(n) {
@@ -133,6 +131,7 @@ const SAVE_DEBOUNCE_MS = 800;
 let saveTimer = null;
 
 function writeSave() {
+  if (privateSession) return;
   // A won board is never resumable — showWin()'s dropSave() is what's
   // supposed to own clearing it, but the celebration animation delays that
   // call, and this debounce/flush can otherwise race ahead of it and
@@ -153,6 +152,7 @@ function writeSave() {
 }
 
 function scheduleSave() {
+  if (privateSession) return; // already captured coherently in the move hook
   clearTimeout(saveTimer);
   saveTimer = setTimeout(writeSave, SAVE_DEBOUNCE_MS);
 }
@@ -163,6 +163,7 @@ function flushSave() {
 }
 
 function dropSave() {
+  if (privateSession) return; // private won/fresh boards are persisted, not deleted
   clearTimeout(saveTimer);
   clearLocalSave();
   // If the load-time cloud pull hasn't resolved yet, remoteSaveTrusted is
@@ -185,6 +186,7 @@ document.addEventListener('visibilitychange', () => {
 
 // A KV write is not guaranteed to finish during unload, so only touch local here.
 window.addEventListener('beforeunload', () => {
+  if (privateSession) return; // private status binding owns the unsaved warning
   clearTimeout(saveTimer);
   if (rules().isWon(game)) return; // same reasoning as writeSave() — never resurrect a finished board
   if (game.moves === 0 && game.history.length === 0) return; // skip untouched deals, as writeSave() does
@@ -199,6 +201,7 @@ window.addEventListener('beforeunload', () => {
 // back (from the cloud, or a save written before it was settled) is never
 // paid in twice.
 function settleVegas() {
+  if (privateSession) return false;
   if (game.scoring !== 'vegas' || !countedThisGame) return false;
   if (isVegasSettled(stats, game.id)) return false;
   stats = recordVegasResult(stats, {
@@ -210,8 +213,11 @@ function settleVegas() {
 
 function showWin() {
   const mode = modeOf(game);
-  stats = recordGameWon(stats, game.moves, Date.now(), mode);
-  saveLocalStats(stats);
+  if (privateSession) stats = privateSession.stats;
+  else {
+    stats = recordGameWon(stats, game.moves, Date.now(), mode);
+    saveLocalStats(stats);
+  }
   if (game.scoring === 'vegas') {
     settleVegas();
     winStatsEl.textContent = `${game.moves} moves, ${money(game.score)} this game. `
@@ -230,6 +236,11 @@ function showWin() {
 // A game counts as played once the player actually moves, so opening the page
 // and walking away does not pad the count.
 function countGameOnce() {
+  if (privateSession) {
+    privateSession.changed(); // includes once-only start/win/settlement before animation
+    stats = privateSession.stats;
+    return;
+  }
   if (countedThisGame) return;
   countedThisGame = true;
   stats = recordGameStarted(stats, Date.now(), modeOf(game));
@@ -287,8 +298,18 @@ function onStockTap() {
 // Deals a new game of `key`, or of the game on the table when no key is
 // given. Abandoning a Vegas game settles its score first.
 function newGame(key = modeOf(game)) {
+  if (privateSession && !privateSession.canPlay) return;
   drag.cancelDrag();
   animator.cancelCelebration();
+  if (privateSession) {
+    privateSession.newGame(key);
+    game = privateSession.game;
+    stats = privateSession.stats;
+    winEl.classList.remove('show');
+    updateModeLabel();
+    requestRender();
+    return;
+  }
   const settled = settleVegas();
   game = dealMode(key);
   saveModePref(key);
@@ -310,6 +331,7 @@ function doUndo() {
   // Vegas, the same payout) be recorded again.
   if (rules().isWon(game)) return;
   if (!rules().undo(game)) return;
+  if (privateSession) { privateSession.changed(); stats = privateSession.stats; }
   playerOwnsBoard = true;
   requestRender();
   scheduleSave();
@@ -465,10 +487,11 @@ async function restoreFromCloud() {
 // the critical path. Must sit after `game`/`countedThisGame` are declared
 // above, or this throws a TDZ ReferenceError. The captured ts is reused below
 // instead of reading localStorage a second time — see the load-time block.
-const bootSave = restoreLocal();
+const bootSave = privateSession ? null : restoreLocal();
 if (bootSave) adoptSave(bootSave.save);
 
 requestRender();
+if (privateSession && rules().isWon(game)) showWin();
 
 // Load-time cloud path: only touch the cloud if already signed in, so opening
 // the game never throws a login dialog at anyone. Puter's docs state that an
@@ -477,6 +500,7 @@ requestRender();
 // game expects to run; loaded as a plain website instead, it stays silent
 // too, because isSignedIn() itself never prompts (see puter-sync.js).
 (async () => {
+  if (privateSession) return;
   signedIn = await cloud.isSignedIn();
   if (!signedIn) return;
 
@@ -501,3 +525,4 @@ requestRender();
   const adopt = remote && shouldAdoptRemote({ bootTs, remoteTs, playerOwnsBoard });
   if (adopt && adoptSave(remote.save)) requestRender();
 })();
+}

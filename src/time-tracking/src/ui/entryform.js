@@ -6,6 +6,7 @@ import { toast } from './toast.js';
 import { field, fieldError, nativeError, projectSelect, switchField, RATE_ERROR } from './fields.js';
 import { icon } from './icons.js';
 import { invoiceNumber, openInvoiceView } from './invoice.js';
+import { trackPrivateDraft } from './private-status.js';
 import { store, rateAt } from '../lib/store.js';
 import {
   parseDuration, fmtClock, fmtTimer, todayISO, fmtDay, isoOf, addDays,
@@ -219,6 +220,7 @@ export function openEntryForm({ date = todayISO(), entry = null, prefill = null,
 
   const save = el('button.btn.btn-primary.btn-block', { type: 'submit' }, isEdit ? 'Save changes' : 'Log time');
 
+  let savedEntry = entry || null;
   const form = el('form.form', {
     onsubmit: async (e) => {
       e.preventDefault();
@@ -265,15 +267,25 @@ export function openEntryForm({ date = todayISO(), entry = null, prefill = null,
         rate: rateVal,
       };
       save.disabled = true;
+      const generation = draft.capture();
       try {
-        if (isEdit) await store.updateEntry(entry.id, entry.date, data);
-        else await store.addEntry(data);
+        if (savedEntry) {
+          await store.updateEntry(savedEntry.id, savedEntry.date, data);
+          savedEntry = { ...savedEntry, ...data };
+        } else savedEntry = await store.addEntry(data);
       } catch (err) {
         console.error(err);
         save.disabled = false;
         toast('Could not save, check your connection', { icon: 'wifiOff' });
         return;
       }
+      if (store.privateMode && !draft.acknowledge(generation)) {
+        save.disabled = false;
+        save.textContent = 'Save changes';
+        toast('Earlier version saved to Jetson; newer edits are still unsaved');
+        return;
+      }
+      draft.dispose();
       modal.close();
       toast(isEdit ? 'Entry updated' : `Logged ${fmtClock(seconds)}`);
       onSaved?.();
@@ -338,7 +350,9 @@ export function openEntryForm({ date = todayISO(), entry = null, prefill = null,
     }, 'Delete entry')
   );
 
+  const draft = trackPrivateDraft(form, store);
   const modal = openModal({
+    onClose: () => draft.dispose(),
     title: isEdit ? 'Edit entry' : prefill ? 'Duplicate entry' : 'Log time',
     content: form,
   });

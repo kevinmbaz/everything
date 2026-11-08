@@ -4,6 +4,7 @@ import { parseSharePayload, parseShareHash } from '../lib/share.js';
 import { taskCard } from '../ui/taskrow.js';
 import { fmtDay, todayISO } from '../lib/dates.js';
 import { plural } from '../lib/util.js';
+import { store } from '../lib/store.js';
 
 /**
  * Read-only viewer for a shared list. Works signed in or out: the data
@@ -11,6 +12,7 @@ import { plural } from '../lib/util.js';
  * viewer's own store.
  */
 export function sharedView() {
+  if (store.isPrivate) return el('p', {}, 'Public lists are unavailable in private mode.');
   const root = el('div');
   const url = parseShareHash(location.hash);
 

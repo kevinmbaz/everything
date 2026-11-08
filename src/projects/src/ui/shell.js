@@ -1,3 +1,5 @@
+import { isPrivateStorage, storage } from '../lib/storage.js';
+import { privateSaveState } from '../lib/private-browser.js';
 import { el, clear } from '../lib/dom.js';
 import { icon } from './icons.js';
 import { store } from '../lib/store.js';
@@ -20,7 +22,17 @@ export { parseRoute };
 
 export function mountShell(appRoot) {
   const viewWrap = el('div.view-wrap');
-  const main = el('main.main', { id: 'main' }, viewWrap);
+  const privateStatus = isPrivateStorage && el('div.private-storage-status', { role: 'status', 'aria-live': 'polite' });
+  const main = el('main.main', { id: 'main' }, privateStatus || null, viewWrap);
+  if (isPrivateStorage) {
+    const renderPrivateStatus = () => {
+      privateStatus.textContent = `Stored on your Jetson · ${privateSaveState(store, storage)}`;
+      privateStatus.classList.toggle('error', !!storage.error || !!storage.conflict);
+    };
+    storage.events.addEventListener('state', renderPrivateStatus);
+    for (const event of ['saving', 'saved', 'save-error', 'conflict', 'change']) store.addEventListener(event, renderPrivateStatus);
+    renderPrivateStatus();
+  }
   let currentView = null;
 
   function navigate(hash, { replace = false } = {}) {

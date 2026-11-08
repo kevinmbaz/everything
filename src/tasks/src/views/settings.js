@@ -83,11 +83,12 @@ export function settingsView() {
 
   /* ---------- calendar integration ---------- */
 
-  const feed = store.settings.calFeed;
+  const feed = store.isPrivate ? null : store.settings.calFeed;
   root.append(
     el('div.section-label', {}, 'Calendar integration'),
     el('div.card', {},
       el('button.setting-row', {
+        disabled: store.isPrivate,
         onclick: async (e) => {
           const rowBtn = e.currentTarget;
           rowBtn.disabled = true;
@@ -112,7 +113,7 @@ export function settingsView() {
         el('span.s-icon', { html: icon('calendarFeed', 19) }),
         el('div.grow', {},
           el('div.s-label', {}, 'Calendar feed'),
-          el('div.s-sub', {}, feed
+          el('div.s-sub', {}, store.isPrivate ? 'Unavailable in private mode. Use the Calendar view to download an ICS file.' : feed
             ? 'On. Your calendar app refreshes from this URL'
             : 'A live .ics URL your calendar app can subscribe to')
         ),
@@ -151,7 +152,7 @@ export function settingsView() {
         el('span.s-icon', { html: icon('fileDown', 19) }),
         el('div.grow', {},
           el('div.s-label', {}, 'Export'),
-          el('div.s-sub', {}, 'Download everything as a JSON file')
+          el('div.s-sub', {}, store.isPrivate ? 'Active/recent tasks and archive month references only. Archive bytes are not included; use a full Jetson backup for history.' : 'Download everything as a JSON file')
         ),
         el('span.s-end', { html: icon('chevR', 17) })
       ),
@@ -170,7 +171,7 @@ export function settingsView() {
 
   // Inside the Puter desktop the platform owns the session; the app must
   // not offer its own sign-out there.
-  const showLogout = typeof puter !== 'undefined' && puter.env !== 'app';
+  const showLogout = !store.isPrivate && typeof puter !== 'undefined' && puter.env !== 'app';
   if (showLogout) {
     root.append(
       el('div.section-label', {}, 'Account'),
@@ -200,7 +201,7 @@ export function settingsView() {
   }
 
   root.append(el('p.small.muted', { style: { margin: '22px 2px', textAlign: 'center' } },
-    'Tasks stores everything in your own Puter cloud. Free, no ads.'));
+    store.isPrivate ? 'Private Jetson storage. Personal tasks only; sharing, public feeds and collaboration are unavailable. No offline write queue.' : 'Tasks stores everything in your own Puter cloud. Free, no ads.'));
 
   return root;
 
@@ -270,7 +271,7 @@ export function settingsView() {
       }
       const ok = await confirmDialog({
         title: 'Import and replace?',
-        message: 'Everything currently in Tasks is replaced by the contents of this file.',
+        message: store.isPrivate ? 'All current tasks and archived logbook files will be replaced. JSON exports do not contain archive bytes. Sharing and collaboration are removed even for same-owner imports.' : 'Everything currently in Tasks is replaced by the contents of this file.',
         confirmLabel: 'Import',
       });
       if (!ok) return;

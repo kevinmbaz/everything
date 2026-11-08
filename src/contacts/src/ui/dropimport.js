@@ -161,7 +161,7 @@ export function startDropImport({
 
   // The Puter route. onItemsOpened holds a single callback, so this is
   // registered once per app instance (from mountApp) and never in service mode.
-  const ui = win && win.puter && win.puter.ui
+  const ui = import.meta.env.VITE_PRIVATE_STORAGE !== '1' && win && win.puter && win.puter.ui
   if (ui && typeof ui.onItemsOpened === 'function') {
     try {
       ui.onItemsOpened((items) => {

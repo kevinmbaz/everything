@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import puterLocalhost from '../../dev/puter-localhost.mjs';
+import { privateStoragePlugin } from '../../private_storage/vite.mjs';
+
+const isPrivate = process.env.VITE_PRIVATE_STORAGE === '1';
 
 /**
  * Writes sw.js from sw.template.js with a precache list of everything the
@@ -54,8 +57,9 @@ function serviceWorker() {
 
 export default defineConfig({
   base: './',
-  plugins: [puterLocalhost('tasks'), serviceWorker()],
+  plugins: [puterLocalhost('tasks'), isPrivate ? privateStoragePlugin({ cachePrefixes: ['tasks-'] }) : serviceWorker()],
   build: {
+    outDir: isPrivate ? 'dist-private' : 'dist',
     target: 'es2022',
     cssTarget: 'safari15',
   },

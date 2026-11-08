@@ -1,3 +1,4 @@
+import { isPrivateStorage } from '../lib/storage.js';
 import { el } from '../lib/dom.js';
 import { icon } from './icons.js';
 import { store } from '../lib/store.js';
@@ -36,6 +37,16 @@ export function openConflictDialog(projectId) {
   if (open.has(projectId)) return null;
   open.add(projectId);
 
+  if (isPrivateStorage) {
+    return openModal({
+      title: 'Conflict — changes not saved',
+      content: el('div.conflict', {},
+        el('p', {}, 'Jetson storage changed in another tab or device. Your edits remain in this tab and have not overwritten the saved version. Saving is blocked until you explicitly reload the page.'),
+        el('p', {}, 'Download your copy or use Settings → Export everything before manually reloading. Keep mine is disabled; reapply edits to the fresh version.'),
+        el('button.btn.btn-primary', { onclick: () => downloadLocalCopy(projectId) }, 'Download my copy')),
+      onClose: () => open.delete(projectId),
+    });
+  }
   const name = store.projectEntry(projectId)?.name || 'This project';
   const busy = (on, label) => {
     for (const b of content.querySelectorAll('button')) b.disabled = on;

@@ -9,6 +9,7 @@ import { icon } from './icons.js';
 import { openModal } from './modal.js';
 import { toast } from './toast.js';
 import { field, fieldError, RATE_ERROR } from './fields.js';
+import { trackPrivateDraft } from './private-status.js';
 import { store, rateAt } from '../lib/store.js';
 import { sampleDataset } from '../lib/sample.js';
 import { CURRENCIES, parseAmount } from '../lib/util.js';
@@ -21,13 +22,14 @@ export function shouldOnboard(store) {
 
 export function openOnboarding() {
   const body = el('div');
+  const draft = trackPrivateDraft(body, store);
 
   const markDone = () => {
     if (!store.settings.onboarded) {
       store.updateSettings({ onboarded: true }).catch(() => {});
     }
   };
-  const modal = openModal({ title: 'Welcome', content: body, onClose: markDone });
+  const modal = openModal({ title: 'Welcome', content: body, onClose: () => { draft.dispose(); markDone(); } });
 
   const skipBtn = () => el('button.btn.btn-ghost.btn-block', {
     type: 'button', style: { marginTop: '10px' },
@@ -41,7 +43,7 @@ export function openOnboarding() {
       el('div.onboard-hero', {},
         el('img', { src: './icons/icon-192.png', width: 64, height: 64, alt: '' }),
         el('h3.onboard-title', {}, 'Every hour, accounted for'),
-        el('p.onboard-sub', {}, 'Track billable hours by client, project, or task. Stored in your own Puter account, never sold or shared.')
+        el('p.onboard-sub', {}, store.privateMode ? 'Track billable hours by client, project, or task. Stored privately on Jetson; no offline browser copy.' : 'Track billable hours by client, project, or task. Stored in your own Puter account, never sold or shared.')
       ),
       el('button.btn.btn-primary.btn-block.btn-tall', {
         type: 'button',
@@ -102,8 +104,23 @@ export function openOnboarding() {
             rate.focus();
             return;
           }
-          ev.target.disabled = true;
-          await store.updateSettings({ currency: currency.value, defaultRate: n, onboarded: true }).catch(() => {});
+          const button = ev.currentTarget;
+          button.disabled = true;
+          const generation = draft.capture();
+          try {
+            await store.updateSettings({ currency: currency.value, defaultRate: n, onboarded: true });
+          } catch (error) {
+            if (store.privateMode) {
+              button.disabled = false;
+              toast('Not saved to Jetson. Keep or copy your setup before reloading.', { icon: 'wifiOff' });
+              return;
+            }
+          }
+          if (store.privateMode && !draft.acknowledge(generation)) {
+            button.disabled = false;
+            toast('Earlier settings saved; newer edits are still unsaved');
+            return;
+          }
           modal.close();
           location.hash = '#/projects';
           toast('Now add your first client and project', { icon: 'folders' });

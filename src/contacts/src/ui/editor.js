@@ -1,5 +1,7 @@
 // Add/edit contact form, shown as a modal panel.
 import { store } from '../store.js'
+import { privateMode, getStorage } from '../storage.js'
+import { contactToVCard } from '../vcard.js'
 import { toast } from '../toast.js'
 import { icons } from '../icons.js'
 import { track } from '../analytics.js'
@@ -238,6 +240,7 @@ export function openEditor(contact, { source = 'manual' } = {}) {
       <footer class="modal__foot">
         ${isEdit ? `<button type="button" class="btn btn--ghost-danger" data-action="delete">${icons.trash}<span>Delete</span></button>` : '<span></span>'}
         <div class="modal__foot-right">
+          ${privateMode ? '<button type="button" class="btn btn--soft" data-action="export-draft">Export draft</button>' : ''}
           <button type="button" class="btn btn--soft" data-action="close">Cancel</button>
           <button type="button" class="btn btn--primary" data-action="save">${isEdit ? 'Save changes' : 'Add contact'}</button>
         </div>
@@ -257,6 +260,8 @@ export function openEditor(contact, { source = 'manual' } = {}) {
   const saveBtn = overlay.querySelector('[data-action="save"]')
 
   let photoData = c.photo || ''
+  let photoPending = 0
+  let closed = false
   // A brand-new contact that already has content (e.g. pre-filled by Smart Add)
   // counts as unsaved work, so dismissing it should confirm just like typed edits.
   const prefilled =
@@ -279,6 +284,19 @@ export function openEditor(contact, { source = 'manual' } = {}) {
   let dirty = prefilled
   let confirming = false
   let saving = false
+  let generation = 0
+  function markDirty() {
+    dirty = true; generation++
+    if (privateMode) getStorage().setDraft(overlay, true)
+  }
+  if (privateMode) getStorage().setDraft(overlay, prefilled)
+  const beforeUnload = event => {
+    if (dirty || saving || getStorage().dirty) {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+  }
+  if (privateMode) window.addEventListener('beforeunload', beforeUnload)
 
   // Hidden image picker, scoped to this modal so it's cleaned up on close.
   const photoInput = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/*' })
@@ -291,6 +309,11 @@ export function openEditor(contact, { source = 'manual' } = {}) {
   })
 
   const close = () => {
+    closed = true
+    if (privateMode) {
+      window.removeEventListener('beforeunload', beforeUnload)
+      getStorage().setDraft(overlay, false)
+    }
     overlay.classList.remove('overlay--in')
     document.removeEventListener('keydown', onKey, true)
     document.body.classList.remove('has-overlay')
@@ -300,7 +323,7 @@ export function openEditor(contact, { source = 'manual' } = {}) {
 
   // Close, but guard against silently discarding unsaved edits.
   const requestClose = async () => {
-    if (confirming) return
+    if (confirming || (privateMode && saving)) return
     if (!dirty) return close()
     confirming = true
     const discard = await confirmDialog({
@@ -378,12 +401,17 @@ export function openEditor(contact, { source = 'manual' } = {}) {
   }
 
   async function setPhotoFromFile(file) {
+    if (privateMode) { photoPending++; markDirty() }
     try {
-      photoData = await fileToDataUrl(file)
-      dirty = true
+      const decoded = await fileToDataUrl(file)
+      if (privateMode && closed) return
+      photoData = decoded
+      markDirty()
       paintAvatar()
     } catch (_e) {
       toast('Could not use that image', 'error')
+    } finally {
+      if (privateMode) photoPending--
     }
   }
 
@@ -443,6 +471,11 @@ export function openEditor(contact, { source = 'manual' } = {}) {
     // settles — a double submit would otherwise re-save and double up the
     // toast/analytics for the same contact.
     if (saving) return
+    if (privateMode && photoPending) {
+      errorEl.textContent = 'Photo is still processing. Wait before saving or exporting this draft.'
+      errorEl.hidden = false
+      return
+    }
     const draft = collect()
     const { valid, errors } = validateContact(draft)
     clearFieldErrors()
@@ -458,14 +491,25 @@ export function openEditor(contact, { source = 'manual' } = {}) {
     saving = true
     saveBtn.disabled = true
     saveBtn.classList.add('is-loading')
+    const submittedGeneration = generation
     try {
       const saved = await store.save(draft)
       store.setUI({ selectedId: saved.id })
+      if (privateMode && generation !== submittedGeneration) {
+        errorEl.textContent = 'Earlier changes saved. Newer edits are still unsaved; save again.'
+        errorEl.hidden = false
+        saving = false
+        saveBtn.disabled = false
+        saveBtn.classList.remove('is-loading')
+        return
+      }
       if (!isEdit) track('Contact Added', { method: source })
       toast(isEdit ? 'Contact updated' : `${displayName(saved)} added`, 'success')
       close()
-    } catch (_e) {
-      errorEl.textContent = 'Could not save to your cloud. Please try again.'
+    } catch (error) {
+      errorEl.textContent = privateMode
+        ? `${error.message} Not saved. Copy/export your draft before manually reloading; automatic retry is disabled.`
+        : 'Could not save to your cloud. Please try again.'
       errorEl.hidden = false
       saving = false
       saveBtn.disabled = false
@@ -477,7 +521,7 @@ export function openEditor(contact, { source = 'manual' } = {}) {
     // Mirror requestClose's guard: while this nested confirm is open, the
     // editor's own key handler must stand down so Esc/Tab belong to the dialog
     // on top — otherwise Escape would close the editor out from under it.
-    if (confirming) return
+    if (confirming || (privateMode && saving)) return
     confirming = true
     const ok = await confirmDialog({
       title: `Delete ${displayName(c)}?`,
@@ -487,8 +531,15 @@ export function openEditor(contact, { source = 'manual' } = {}) {
     })
     confirming = false
     if (!ok) return
+    const submittedGeneration = generation
+    if (privateMode) { saving = true; saveBtn.disabled = true }
     try {
       await store.remove(c.id)
+      if (privateMode && generation !== submittedGeneration) {
+        errorEl.textContent = 'Contact deleted. Newer edits remain unsaved; export them or save to recreate this contact.'
+        errorEl.hidden = false
+        return
+      }
       toast('Contact deleted', 'success', 6000, {
         label: 'Undo',
         onClick: async () => {
@@ -505,8 +556,14 @@ export function openEditor(contact, { source = 'manual' } = {}) {
         },
       })
       close()
-    } catch (_e) {
+    } catch (error) {
+      if (privateMode) {
+        errorEl.textContent = `${error.message} Not deleted. Export your draft before manually reloading.`
+        errorEl.hidden = false
+      }
       toast('Could not delete the contact', 'error')
+    } finally {
+      if (privateMode) { saving = false; saveBtn.disabled = false }
     }
   }
 
@@ -515,12 +572,24 @@ export function openEditor(contact, { source = 'manual' } = {}) {
     if (isBackdropDismiss(e)) return requestClose()
     const action = e.target.closest('[data-action]')?.dataset.action
     if (action === 'close') requestClose()
+    else if (action === 'export-draft') {
+      if (privateMode && photoPending) {
+        errorEl.textContent = 'Photo is still processing. Wait before saving or exporting this draft.'
+        errorEl.hidden = false
+        return
+      }
+      const url = URL.createObjectURL(new Blob([contactToVCard(collect(), { preserveIds: true })], { type: 'text/vcard;charset=utf-8' }))
+      const link = document.createElement('a')
+      link.href = url; link.download = 'contact-draft.vcf'
+      link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    }
     else if (action === 'save') save()
     else if (action === 'delete') remove()
     else if (action === 'pick-photo') photoInput.click()
     else if (action === 'remove-photo') {
       photoData = ''
-      dirty = true
+      markDirty()
       paintAvatar()
     } else if (action === 'add-row') {
       const group = e.target.closest('[data-action="add-row"]').dataset.group
@@ -530,7 +599,7 @@ export function openEditor(contact, { source = 'manual' } = {}) {
     } else if (action === 'remove-row') {
       const row = e.target.closest('.repeat-row')
       // Removing a filled-in row is an edit: the discard guard must know.
-      if (row.querySelector('.repeat-row__value').value.trim()) dirty = true
+      if (row.querySelector('.repeat-row__value').value.trim()) markDirty()
       row.remove()
     } else if (action === 'add-address') {
       const list = overlay.querySelector('[data-addresses]')
@@ -543,13 +612,13 @@ export function openEditor(contact, { source = 'manual' } = {}) {
       const filled = [...block.querySelectorAll('[data-addr-field]')].some(
         (el) => !['country', 'label'].includes(el.dataset.addrField) && el.value.trim(),
       )
-      if (filled) dirty = true
+      if (filled) markDirty()
       block.remove()
     }
   })
 
   form.addEventListener('input', (e) => {
-    dirty = true
+    markDirty()
     if (e.target.classList && e.target.classList.contains('input--error')) {
       e.target.classList.remove('input--error')
       e.target.removeAttribute('aria-invalid')
@@ -560,7 +629,7 @@ export function openEditor(contact, { source = 'manual' } = {}) {
   // Reshape an address block's fields when its country changes, keeping any
   // values the new layout still has a place for.
   form.addEventListener('change', (e) => {
-    dirty = true
+    markDirty()
     if (!(e.target.matches && e.target.matches('[data-addr-field="country"]'))) return
     const block = e.target.closest('[data-address]')
     const addr = {}

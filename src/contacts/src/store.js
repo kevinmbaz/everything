@@ -2,7 +2,11 @@
 // each is stored under its own key ("contact:<id>") so reads/writes scale and
 // never collide. UI preferences are kept device-local via env.getPref.
 import { normalizeContact, normalizeTags, contactKey, displayName } from './model.js'
-import { withTimeout, getPref, setPref } from './env.js'
+import { withTimeout as puterTimeout, getPref, setPref } from './env.js'
+import { getStorage, privateMode } from './storage.js'
+// Private transport owns its abort/uncertain-outcome timeout. A shorter race
+// here could report failure and then publish a late success behind the form.
+const withTimeout = (promise, ms, label) => privateMode ? promise : puterTimeout(promise, ms, label)
 import { SORT_KEYS } from './search.js'
 
 // Identity signatures used to skip duplicates on import. Email is the strong
@@ -60,6 +64,7 @@ class Store {
     this.loadedAt = 0
     this.error = null
     this.listeners = new Set()
+    this.privateMutations = Promise.resolve()
     this.ui = {
       query: '',
       sort: SORT_KEYS.includes(getPref('sort')) ? getPref('sort') : 'first',
@@ -143,7 +148,7 @@ class Store {
     // a book that has aged. The client-side prefix check below still stands, so
     // a backend that ignores the pattern behaves exactly as it always did.
     const raw = await withTimeout(
-      window.puter.kv.list('contact:*', true),
+      getStorage().kv.list('contact:*', true),
       20000,
       'Loading contacts',
     )
@@ -234,10 +239,18 @@ class Store {
       createdAt: (existing && existing.createdAt) || contact.createdAt || Date.now(),
       updatedAt: Date.now(),
     })
+    if (privateMode) {
+      return this.serializePrivateMutation(async () => {
+        await getStorage().kv.set(contactKey(c.id), c)
+        this.contacts.set(c.id, c)
+        this.emit()
+        return c
+      })
+    }
     this.contacts.set(c.id, c)
     this.emit()
     try {
-      await withTimeout(window.puter.kv.set(contactKey(c.id), c), 15000, 'Saving contact')
+      await withTimeout(getStorage().kv.set(contactKey(c.id), c), 15000, 'Saving contact')
     } catch (err) {
       // Roll back optimistic state to whatever the cloud actually holds.
       if (existing) this.contacts.set(c.id, existing)
@@ -250,13 +263,23 @@ class Store {
 
   /** Delete a contact by id. */
   async remove(id) {
+    if (privateMode) {
+      return this.serializePrivateMutation(async () => {
+        if (!this.contacts.has(id)) return
+        await getStorage().kv.del(contactKey(id))
+        this.contacts.delete(id)
+        this.ui.checked.delete(id)
+        if (this.ui.selectedId === id) this.ui.selectedId = null
+        this.emit()
+      })
+    }
     const existing = this.contacts.get(id)
     if (!existing) return
     this.contacts.delete(id)
     if (this.ui.selectedId === id) this.ui.selectedId = null
     this.emit()
     try {
-      await withTimeout(window.puter.kv.del(contactKey(id)), 15000, 'Deleting contact')
+      await withTimeout(getStorage().kv.del(contactKey(id)), 15000, 'Deleting contact')
     } catch (err) {
       this.contacts.set(id, existing)
       this.emit()
@@ -278,6 +301,11 @@ class Store {
    *   after each contact, counting failures, so the count always reaches total.
    */
   async removeMany(ids, { concurrency = 6, onProgress = null } = {}) {
+    const captured = [...ids]
+    return this.serializePrivateMutation(() => this.removePrepared(captured, { concurrency, onProgress }))
+  }
+
+  async removePrepared(ids, { concurrency, onProgress }) {
     const queue = ids.filter((id) => this.contacts.has(id))
     const total = queue.length
     let deleted = 0
@@ -288,7 +316,7 @@ class Store {
       while (queue.length) {
         const id = queue.shift()
         try {
-          await withTimeout(window.puter.kv.del(contactKey(id)), 15000, 'Deleting contacts')
+          await withTimeout(getStorage().kv.del(contactKey(id)), 15000, 'Deleting contacts')
           this.contacts.delete(id)
           this.ui.checked.delete(id)
           if (this.ui.selectedId === id) this.ui.selectedId = null
@@ -306,6 +334,20 @@ class Store {
     return deleted
   }
 
+  // Deduplication and delete existence checks must see earlier acknowledged
+  // mutations. All private writes/deletes share this FIFO through publication,
+  // so a later delete cannot be overtaken by an earlier queued update.
+  // Keep queued work dirty before transport starts.
+  serializePrivateMutation(task) {
+    if (!privateMode) return task()
+    const storage = getStorage()
+    const token = Symbol('queued contact mutation')
+    storage.setDraft(token, true)
+    const result = this.privateMutations.then(task).finally(() => storage.setDraft(token, false))
+    this.privateMutations = result.catch(() => {})
+    return result
+  }
+
   /**
    * Import many contacts, skipping ones that duplicate an existing contact (or
    * an earlier card in the same file). Persistence runs with limited
@@ -313,10 +355,14 @@ class Store {
    * @param {function(number, number)} [options.onProgress] - (finished, total)
    *   after each write, counting failures, so the count always reaches total.
    *   `total` excludes the duplicates that were skipped without a write.
-   * @returns {Promise<{written: number, skipped: number}>}
+   * @returns {Promise<{written: number, skipped: number, failed?: number}>}
    */
   async importMany(contacts, { concurrency = 6, onProgress = null } = {}) {
     const prepared = contacts.map((c) => normalizeContact(c))
+    return this.serializePrivateMutation(() => this.importPrepared(prepared, { concurrency, onProgress }))
+  }
+
+  async importPrepared(prepared, { concurrency, onProgress }) {
     // Index what's already stored, then filter out duplicates (including
     // duplicates within this same import).
     const seen = new Set()
@@ -324,14 +370,16 @@ class Store {
       for (const k of contactSignatures(c)) seen.add(k)
     }
     const toWrite = []
+    const seenIds = new Set(this.contacts.keys())
     let skipped = 0
     for (const c of prepared) {
       const sigs = contactSignatures(c)
-      if (sigs.length && sigs.some((k) => seen.has(k))) {
+      if ((privateMode && seenIds.has(c.id)) || (sigs.length && sigs.some((k) => seen.has(k)))) {
         skipped++
         continue
       }
       for (const k of sigs) seen.add(k)
+      seenIds.add(c.id)
       toWrite.push(c)
     }
 
@@ -345,7 +393,7 @@ class Store {
       while (queue.length) {
         const c = queue.shift()
         try {
-          await withTimeout(window.puter.kv.set(contactKey(c.id), c), 15000, 'Importing contacts')
+          await withTimeout(getStorage().kv.set(contactKey(c.id), c), 15000, 'Importing contacts')
           this.contacts.set(c.id, c)
           written++
         } catch (_e) {
@@ -358,7 +406,7 @@ class Store {
     }
     await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker))
     this.emit()
-    return { written, skipped }
+    return privateMode ? { written, skipped, failed: total - written } : { written, skipped }
   }
 
   /**
@@ -372,6 +420,10 @@ class Store {
    */
   async saveMany(contacts, { concurrency = 6, onProgress = null } = {}) {
     const queue = contacts.map((c) => normalizeContact(c))
+    return this.serializePrivateMutation(() => this.savePrepared(queue, { concurrency, onProgress }))
+  }
+
+  async savePrepared(queue, { concurrency, onProgress }) {
     const total = queue.length
     let saved = 0
     let failed = 0
@@ -381,7 +433,7 @@ class Store {
       while (queue.length) {
         const c = queue.shift()
         try {
-          await withTimeout(window.puter.kv.set(contactKey(c.id), c), 15000, 'Saving contacts')
+          await withTimeout(getStorage().kv.set(contactKey(c.id), c), 15000, 'Saving contacts')
           this.contacts.set(c.id, c)
           saved++
         } catch (_e) {

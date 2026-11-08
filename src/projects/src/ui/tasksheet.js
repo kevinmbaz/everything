@@ -1,8 +1,10 @@
+import { isPrivateStorage } from '../lib/storage.js';
+import { persistInput } from '../lib/private-browser.js';
 import { el, clear } from '../lib/dom.js';
 import { icon } from './icons.js';
 import { store, PRIORITIES } from '../lib/store.js';
 import { columnTasks } from '../lib/board.js';
-import { debounce, relativeTime, formatBytes, fieldId } from '../lib/util.js';
+import { relativeTime, formatBytes, fieldId } from '../lib/util.js';
 import { fmtShort } from '../lib/dates.js';
 import { openModal, confirmDialog } from './modal.js';
 import { openMenu } from './menu.js';
@@ -48,7 +50,7 @@ export function mountTaskSheet(projectId, taskId, { onClose } = {}) {
     value: task.title,
     'aria-label': 'Task title',
     maxLength: 200,
-    oninput: debounce(() => {
+    oninput: persistInput(() => {
       const v = titleInput.value.trim();
       if (v) patch({ title: v });
     }, 400),
@@ -66,7 +68,7 @@ export function mountTaskSheet(projectId, taskId, { onClose } = {}) {
     placeholder: 'Add a description… Markdown is supported',
     'aria-label': 'Description',
     value: task.description || '',
-    oninput: debounce(() => patch({ description: descInput.value.trim() }), 500),
+    oninput: persistInput(() => patch({ description: descInput.value.trim() }), 500),
     onkeydown: (e) => {
       if (e.isComposing) return;
       // Escape and Cmd/Ctrl+Enter both mean "done editing" (the comment box
@@ -379,7 +381,7 @@ export function mountTaskSheet(projectId, taskId, { onClose } = {}) {
       // A web address, from an imported Trello card: it opens in a tab, and
       // there are no bytes here to preview or download.
       const web = att.kind === 'url' && safeHref(att.url);
-      const isBroken = linked && broken.has(att.id);
+      const isBroken = linked && (isPrivateStorage || broken.has(att.id));
       attachList.append(el('div.attach-row', {
         className: `attach-row${isBroken ? ' broken' : ''}`,
       },
@@ -397,7 +399,7 @@ export function mountTaskSheet(projectId, taskId, { onClose } = {}) {
             type: 'button',
             disabled: isBroken,
             title: isBroken
-              ? `${att.path} is no longer there`
+              ? isPrivateStorage ? 'Puter Drive link unavailable — upload the original file from your device' : `${att.path} is no longer there`
               : linked
                 ? `${att.path} (in your Puter Drive)`
                 : canPreview(att) ? `Open ${att.name}` : `Download ${att.name}`,
@@ -405,7 +407,7 @@ export function mountTaskSheet(projectId, taskId, { onClose } = {}) {
           }, att.name),
         linked && el('span.attach-tag', {
           title: 'Linked from your Puter Drive, not copied here',
-        }, isBroken ? 'missing' : 'linked'),
+        }, isPrivateStorage ? 'Drive unavailable' : isBroken ? 'missing' : 'linked'),
         web && el('span.attach-tag', {
           title: 'A web address this task points at, not a file kept here',
         }, 'web'),
@@ -504,7 +506,7 @@ export function mountTaskSheet(projectId, taskId, { onClose } = {}) {
 
   /* Linking beats copying on a platform where the file is already in the
      user's cloud: one copy of the truth, and no second one to go stale. */
-  const linkBtn = canPickFiles() && el('button.btn.btn-ghost.btn-sm', {
+  const linkBtn = isPrivateStorage ? el('span.form-hint', {}, 'Puter Drive unavailable — upload from your device') : canPickFiles() && el('button.btn.btn-ghost.btn-sm', {
     type: 'button',
     html: icon('link', 14, 2),
     onclick: async () => {

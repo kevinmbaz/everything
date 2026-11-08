@@ -148,10 +148,12 @@ export function expensesView({ navigate }) {
   function addToReport(ids, drafts) {
     const body = el('div.stack');
     const modal = openModal({ title: 'Add to report', content: body });
-    const pick = async (reportId) => {
+    let createdReport = null;
+    let creating = false;
+    const pick = async (reportId, generation = modal.editGeneration) => {
       try {
         await store.setReport(ids, reportId);
-        modal.close();
+        if (!modal.closeIfUnchanged(generation)) return;
         toggleSelecting(false);
         toast(`${ids.length} expense${ids.length === 1 ? '' : 's'} added to the report`, { action: { label: 'Open', onClick: () => navigate(`#/reports/${reportId}`) } });
       } catch (err) { console.error(err); toast('Couldn’t update. Check your connection', { icon: 'wifiOff' }); }
@@ -162,8 +164,16 @@ export function expensesView({ navigate }) {
         el('div.grow', {}, el('div.title', {}, r.title), el('div.sub', {}, 'Draft')), el('span', { html: icon('chevR', 18), style: { color: 'var(--ink-3)' } }))))
         : el('p.muted.small', {}, 'No draft reports yet. Create one:'),
       el('div.row', {}, titleInput, el('button.btn.btn-primary', { type: 'button', onclick: async () => {
-        const r = await store.createReport({ title: titleInput.value.trim() || titleInput.placeholder }).catch(() => null);
-        if (r) pick(r.id);
+        if (creating) return;
+        creating = true;
+        const generation = modal.editGeneration;
+        const data = { title: titleInput.value.trim() || titleInput.placeholder };
+        try {
+          const r = createdReport ? await store.updateReport(createdReport.id, data) : await store.createReport(data);
+          if (store.sdk?.mode === 'private') createdReport = r;
+          await pick(r.id, generation);
+        } catch { toast('Couldn’t create report', { icon: 'wifiOff' }); }
+        finally { creating = false; }
       } }, 'Create'))
     );
   }

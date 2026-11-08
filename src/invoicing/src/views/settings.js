@@ -4,6 +4,7 @@ import { toast } from '../ui/toast.js';
 import { confirmDialog } from '../ui/modal.js';
 import { field, selectWrap, download, refocus, taxNoteControl } from '../ui/bits.js';
 import { store } from '../lib/store.js';
+import { isPrivate } from '../lib/storage.js';
 import { clamp } from '../lib/util.js';
 import { CURRENCIES } from '../lib/money.js';
 import { MAX_TERM_DAYS, settingsTaxes, termDays } from '../lib/doc.js';
@@ -893,8 +894,10 @@ export function settingsView({ navigate }) {
       const ok = await confirmDialog({
         title: 'Restore this backup?',
         message: `It holds ${restoreSummary(counts)}. Everything in this account is replaced by it, `
-          + 'including your business profile and numbering. Documents come back unshared, so any '
-          + 'published page is taken offline and can be shared again afterwards.',
+          + 'including your business profile and numbering. '
+          + (isPrivate
+            ? 'Documents come back unshared. Attachment files must already exist on this Jetson. Any old pages on Puter must be removed there separately.'
+            : 'Documents come back unshared, so any published page is taken offline and can be shared again afterwards.'),
         confirmLabel: 'Replace my data',
       });
       if (!ok) return;
@@ -929,7 +932,9 @@ export function settingsView({ navigate }) {
       navigate('#/');
     } catch (err) {
       console.error(err);
-      toast('Could not restore that backup. Nothing was changed', { icon: 'wifiOff' });
+      toast(isPrivate
+        ? 'Restore did not complete. Reload to check your data before trying again; a daily server backup is available.'
+        : 'Could not restore that backup. Nothing was changed', { icon: 'wifiOff' });
     } finally {
       restoreBtn.disabled = false;
       // A restore that went through has already navigated away, and the
@@ -1019,16 +1024,18 @@ export function settingsView({ navigate }) {
     el('p.card-sub', {},
       'Install the app and it keeps working with no connection: the last data it loaded opens '
       + 'read-only, so invoices, receipts, statements, and reports can all still be read, printed, '
-      + 'and downloaded as PDFs. Making changes needs your cloud.'),
+      + (isPrivate ? 'and downloaded as PDFs. Making changes needs a connection to your Jetson through Tailscale.' : 'and downloaded as PDFs. Making changes needs your cloud.')),
     el('div.field', {},
       el('label.check-row', {}, offlineBox,
         el('span', {}, 'Keep a copy on this device for offline use',
-          el('span.field-hint', {}, ' (removed when you switch this off, and when you sign out)')))),
+          el('span.field-hint', {}, isPrivate ? ' (removed when you switch this off)' : ' (removed when you switch this off, and when you sign out)')))),
     offlineNote);
 
   const dataCard = el('section.card.settings-card', {},
     el('h2.card-title', {}, 'Your data'),
-    el('p.card-sub', {}, 'Everything lives in your own Puter cloud. Download a copy anytime, and put one back if you ever need to.'),
+    el('p.card-sub', {}, isPrivate
+      ? 'Invoices, clients, settings and attachments are stored on your Jetson, not Puter or this browser. Access is restricted to your Tailscale account. Daily server backups include attachments. The JSON download below contains records only, not attachment files. Public sharing and paid email sending are disabled; download PDFs and attach them in Gmail or your email app.'
+      : 'Everything lives in your own Puter cloud. Download a copy anytime, and put one back if you ever need to.'),
     el('div.side-actions', {},
       el('button.btn', {
         html: icon('download', 15, 1.6),
@@ -1040,7 +1047,7 @@ export function settingsView({ navigate }) {
       }, ' Download backup'),
       restoreBtn,
       restoreFile,
-      !isPuterApp && el('button.btn.btn-danger', {
+      !isPrivate && !isPuterApp && el('button.btn.btn-danger', {
         html: icon('logout', 15, 1.6),
         onclick: confirmSignOut,
       }, ' Sign out')));
@@ -1048,7 +1055,7 @@ export function settingsView({ navigate }) {
   root.append(
     el('div.page-head', {}, el('div', {},
       el('h1.page-title', {}, 'Settings'),
-      el('p.page-sub', {}, store.user?.username ? `Signed in as ${store.user.username}` : 'Your workspace'))),
+      el('p.page-sub', {}, isPrivate ? 'Private Jetson storage · Tailscale access' : (store.user?.username ? `Signed in as ${store.user.username}` : 'Your workspace')))),
     el('div.settings-grid', {},
       businessCard, defaultsCard, savedItemsCard, numberingCard, paylinkCard, payInstructionsCard,
       lateFeeCard, templatesCard, appearanceCard, acctCard, importCard, offlineCard, dataCard)

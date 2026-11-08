@@ -11,6 +11,7 @@
  * @param {Record<string, string|number>} [props] Optional custom properties.
  */
 export function track(event, props) {
+  if (import.meta.env.VITE_PRIVATE_STORAGE === '1') return
   try {
     if (typeof window !== 'undefined' && typeof window.plausible === 'function') {
       window.plausible(event, props ? { props } : undefined)

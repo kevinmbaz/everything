@@ -60,7 +60,8 @@ let justJoined = null;
 /** A join still running, so a view remounted mid-flight can wait for it. */
 let joinInFlight = null;
 
-export function joinView({ navigate }) {
+export function joinView({ navigate } = {}) {
+  if (store.isPrivate) return el('p', {}, 'Collaboration is unavailable in private mode.');
   const root = el('div');
   const url = parseJoinHash(location.hash);
   if (!url) {
@@ -189,7 +190,8 @@ export function joinView({ navigate }) {
   }
 }
 
-export function approveView({ navigate }) {
+export function approveView({ navigate } = {}) {
+  if (store.isPrivate) return el('p', {}, 'Collaboration is unavailable in private mode.');
   const root = el('div');
   const payload = parseConfirmHash(location.hash);
 

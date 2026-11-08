@@ -2,7 +2,13 @@
 
 Lightweight project management on [Puter](https://puter.com): kanban boards, timelines, milestones, assignees, comments, and attachments. Think Trello or Asana, not enterprise Jira.
 
-Built with vanilla JavaScript and [Puter.js](https://docs.puter.com) — no frontend framework, no backend of our own. Every byte of your data lives in your own Puter account.
+Built with vanilla JavaScript and [Puter.js](https://docs.puter.com). The default build uses your Puter account for authentication and primary storage, with a browser-local offline mirror.
+
+## Private Jetson mode
+
+An opt-in `VITE_PRIVATE_STORAGE=1 npm run build` produces `dist-private`, using a real Jetson SQLite backend and owner-restricted Tailscale access instead of Puter. Projects, task progress and uploaded attachments stay on the Jetson. The standard build is preserved separately; existing Puter data is not migrated automatically. Private mode requires a live connection and does not replay browser-local drafts.
+
+See [Private storage setup, backups and verification](PRIVATE-STORAGE.md). The feature list below describes the original Puter mode; private mode disables Puter Drive integrations and cloud/offline sign-in.
 
 ## Features
 

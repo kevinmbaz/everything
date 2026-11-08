@@ -48,6 +48,7 @@
 
 import { uid, round2, sum, textMatches } from './util.js';
 import { monthKeyOf, monthDays, isoOf, addDays, daysApart, todayISO, roundSeconds, toHours } from './time.js';
+import { storage } from './storage.js';
 import { offline, isNetworkError } from './offline.js';
 
 /* ---------- effective-dated rates ----------
@@ -353,7 +354,7 @@ export function invoiceLocksOf(entry) {
 
 /** True when a stored logo path is one this app wrote. */
 export function isLogoPath(path) {
-  return typeof path === 'string' && /^hourly-data\/logo-\d+\.(png|jpg|webp)$/.test(path);
+  return typeof path === 'string' && /^hourly-data\/logo-\d+(?:-[A-Za-z0-9_-]+)?\.(png|jpg|webp)$/.test(path);
 }
 
 export const DEFAULT_SETTINGS = {
@@ -400,6 +401,87 @@ function isMissingFileError(err) {
 }
 
 class Store extends EventTarget {
+  constructor(storage = null) {
+    super();
+    this.storage = storage;
+    // Internal calls bypass the public command boundary, so nested
+    // invoice/entry operations join their caller's single transaction.
+    for (const name of ['addEntry', 'stopTimer', 'updateSettings', 'addClient',
+      'updateClient', 'archiveClient', 'addProject', 'updateProject', 'archiveProject',
+      'updateEntry', 'deleteEntry', 'bulkPatch', 'bulkDelete', 'restoreEntries',
+      'markInvoiced', 'createInvoice', 'voidInvoice', 'addPayment', 'removePayment',
+      'startTimer', 'retagTimer', 'discardTimer', 'importEntries', 'saveLogo',
+      'writeBackup', 'importAll']) {
+      const impl = this[name].bind(this);
+      this[`_${name}`] = impl;
+      if (this.privateMode) this[name] = (...args) => {
+        const captured = structuredClone(args);
+        return this.#privateCommand(name, () => impl(...captured));
+      };
+    }
+  }
+  #commandTail = Promise.resolve();
+  #batch = null;
+  #pending = 0;
+  #stopRetry = null;
+  storageError = null;
+
+  // One user command, one atomic batch. No disk/browser outbox and no
+  // automatic retry: failed/uncertain work remains visible until copied.
+  #privateCommand(name, run) {
+    this.#pending++;
+    this.dispatchEvent(new Event('storage-state'));
+    const execute = async () => {
+      if (name === 'stopTimer' && this.#stopRetry) {
+        const retry = this.#stopRetry;
+        try {
+          await this.storage.transaction(retry.operations, { idempotencyKey: retry.key });
+          if (this.timer === retry.timer) this.timer = null;
+          this.storageError = null;
+          this.#stopRetry = null;
+          return retry.result;
+        } catch (error) { this.storageError = error; throw error; }
+      }
+      if (this.storageError) throw this.storageError;
+      this.#batch = new Map();
+      const originalTimer = this.timer;
+      try {
+        const result = await run();
+        const operations = [...this.#batch.values()];
+        if (operations.length) {
+          if (name === 'stopTimer') {
+            const timer = this.timer;
+            const key = `timer-stop-${timer.id || timer.startedAt}`;
+            this.#stopRetry = { operations, key, result, timer };
+            await this.storage.transaction(operations, { idempotencyKey: key });
+            if (this.timer === timer) this.timer = null;
+            this.#stopRetry = null;
+          } else await this.storage.transaction(operations);
+        }
+        return result;
+      } catch (error) {
+        if (name === 'discardTimer') this.timer = originalTimer;
+        if (this.#batch.size || this.storage.error || this.storage.dirty) this.storageError = error;
+        throw error;
+      } finally {
+        this.#batch = null;
+      }
+    };
+    const task = this.#commandTail.then(execute, execute);
+    this.#commandTail = task.catch(() => {});
+    return task.finally(() => {
+      this.#pending--;
+      this.#emit();
+      this.dispatchEvent(new Event('storage-state'));
+    });
+  }
+
+  #stage(operation) {
+    if (!this.#batch) throw new Error('Private mutation outside a command');
+    this.#batch.set(`${operation.kind}:${operation.key || operation.path}`, structuredClone(operation));
+  }
+
+  get privateMode() { return this.storage?.mode === 'private'; }
   settings = { ...DEFAULT_SETTINGS };
   clients = [];
   projects = [];
@@ -425,12 +507,13 @@ class Store extends EventTarget {
     // per user, and a cache left by a different account must never be
     // served (or flushed) into this one.
     let user = null;
-    try {
+    if (this.privateMode) user = await this.storage.getUser();
+    else try {
       user = await puter.auth.getUser();
     } catch {
       user = null;
     }
-    if (user?.uuid) {
+    if (!this.privateMode && user?.uuid) {
       if (offline.hasCache() && !offline.matches(user)) offline.clearAll();
       offline.setUser(user);
     }
@@ -451,16 +534,17 @@ class Store extends EventTarget {
     this.backups = (backups || []).slice().sort((a, b) => a.date.localeCompare(b.date));
     this.invoices = (invoices || []).slice().sort((a, b) => a.number - b.number);
     this.timer = timer || null;
-    this.user = user || (offline.user ? { username: offline.user.username } : null);
+    this.user = user || (!this.privateMode && offline.user ? { username: offline.user.username } : null);
     // Queued lists include records the server has never seen. After a
     // reload their server baseline is unknown, so do not mistake those
     // local additions for records deleted remotely during the next merge.
     for (const [key, prop] of Object.entries(LIST_PROP)) {
-      if (!offline.isDirty(`kv:${key}`)) this.#kvBase.set(key, idSet(this[prop]));
+      if (!this.privateMode && !offline.isDirty(`kv:${key}`)) this.#kvBase.set(key, idSet(this[prop]));
     }
   }
 
   #emit() {
+    if (this.#batch) return;
     this.dispatchEvent(new Event('change'));
   }
 
@@ -473,6 +557,7 @@ class Store extends EventTarget {
    * failure still fails loudly so defaults never overwrite real data.
    */
   async #kvGet(key) {
+    if (this.privateMode) return this.storage.kv.get(key);
     const decode = (raw) => (raw == null ? null : JSON.parse(raw));
     if (offline.isDirty(`kv:${key}`)) {
       const cached = offline.getKV(key);
@@ -524,6 +609,10 @@ class Store extends EventTarget {
    * the caller can adopt it as its own state.
    */
   async #kvSet(key, value, merge = null) {
+    if (this.privateMode) {
+      this.#stage({ kind: 'kv', key, method: 'PUT', value });
+      return value;
+    }
     let payload = value;
     await this.#queueWrite(`kv:${key}`, async () => {
       if (merge) {
@@ -561,7 +650,7 @@ class Store extends EventTarget {
          it into the offline queue has not been seen there, and counting it
          as seen would make the flush read this device's own new records as
          records the other device had deleted. */
-      if (!offline.isDirty(`kv:${key}`)) this.#kvBase.set(key, idSet(written));
+      if (!this.privateMode && !offline.isDirty(`kv:${key}`)) this.#kvBase.set(key, idSet(written));
       return written;
     } catch (err) {
       this[prop] = prev;
@@ -598,6 +687,7 @@ class Store extends EventTarget {
 
   /** How many local writes are queued waiting for the network. */
   pendingWrites() {
+    if (this.privateMode) return this.#pending + (this.privateDrafts?.size || 0) + (this.storageError || this.storage.dirty ? 1 : 0);
     return offline.pendingCount();
   }
 
@@ -617,6 +707,7 @@ class Store extends EventTarget {
    * newer one, and the flush will reconcile it on its way out.
    */
   async refresh({ months = 3 } = {}) {
+    if (this.privateMode) return 0;
     if (this.#refreshing) return 0;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return 0;
     this.#refreshing = true;
@@ -747,6 +838,7 @@ class Store extends EventTarget {
    * writes landed.
    */
   async flushPending() {
+    if (this.privateMode) return 0;
     let flushed = 0;
     for (const entry of offline.dirtyList()) {
       try {
@@ -961,7 +1053,7 @@ class Store extends EventTarget {
   }
 
   async archiveProject(id, archived = true) {
-    await this.updateProject(id, { archived });
+    await this._updateProject(id, { archived });
   }
 
   /**
@@ -1120,6 +1212,19 @@ class Store extends EventTarget {
   }
 
   async #readMonth(key) {
+    if (this.privateMode) {
+      let entries;
+      try {
+        entries = JSON.parse(await (await this.storage.fs.read(monthPath(key))).text());
+      } catch (error) {
+        if (error?.code !== 'ENOENT' && error?.code !== 'subject_does_not_exist') throw error;
+        entries = [];
+      }
+      if (!Array.isArray(entries)) throw new Error('Invalid month document');
+      entries.sort(byEntryOrder);
+      this.#monthCache.set(key, entries);
+      return entries;
+    }
     let text;
     if (this.months.includes(key)) {
       // A month with a queued local write is newer in the mirror than on
@@ -1198,6 +1303,14 @@ class Store extends EventTarget {
   }
 
   async #persistMonth(key, entries) {
+    if (this.privateMode) {
+      const stored = entries.slice().sort(byEntryOrder);
+      this.months = [...new Set([...this.months, key])].sort();
+      this.#monthCache.set(key, stored);
+      this.#stage({ kind: 'kv', key: KV.months, method: 'PUT', value: this.months });
+      this.#stage({ kind: 'file', path: monthPath(key), method: 'PUT', value: JSON.stringify(stored) });
+      return;
+    }
     entries.sort(byEntryOrder);
     if (!this.months.includes(key)) {
       // Index first: a file without an index entry would be invisible.
@@ -1502,7 +1615,7 @@ class Store extends EventTarget {
     // a complete invoice; nothing at all is still nothing.
     if (!targets.length && !manual.length) throw new Error('Nothing to invoice');
 
-    await this.markInvoiced(targets, true);
+    await this._markInvoiced(targets, true);
     // Read the locked copies back so totals reflect exactly what froze.
     const locked = await this.#entriesByRef(targets);
     const seconds = sum(locked, (e) => this.billedSeconds(e));
@@ -1566,7 +1679,7 @@ class Store extends EventTarget {
     try {
       await this.#setInvoices([...this.invoices, invoice]);
     } catch (err) {
-      await this.markInvoiced(targets, false).catch(() => {});
+      await this._markInvoiced(targets, false).catch(() => {});
       throw err;
     }
     this.#emit();
@@ -1582,7 +1695,7 @@ class Store extends EventTarget {
   async voidInvoice(id) {
     const invoice = this.invoices.find((i) => i.id === id);
     if (!invoice) return;
-    await this.markInvoiced(invoice.entries, false);
+    await this._markInvoiced(invoice.entries, false);
     await this.#setInvoices(this.invoices.filter((i) => i.id !== id));
     this.#emit();
   }
@@ -1854,7 +1967,8 @@ class Store extends EventTarget {
   }
 
   async startTimer({ projectId, task = '', notes = '', billable = true }) {
-    this.timer = { startedAt: Date.now(), projectId, task: task.trim(), notes, billable };
+    if (this.privateMode && this.timer) throw new Error('A timer is already running');
+    this.timer = { ...(this.privateMode ? { id: crypto.randomUUID() } : {}), startedAt: Date.now(), projectId, task: task.trim(), notes, billable };
     try {
       await this.#kvSet(KV.timer, this.timer);
     } catch (err) {
@@ -1872,6 +1986,7 @@ class Store extends EventTarget {
    * timer started on (the entry lands on that day).
    */
   async retagTimer(patch) {
+    if (!this.timer && this.privateMode) throw new Error('No running timer; your timer changed while saving');
     if (!this.timer) return null;
     const prev = this.timer;
     const next = { ...prev, ...patch, task: String(patch.task ?? prev.task).trim() };
@@ -1899,6 +2014,23 @@ class Store extends EventTarget {
    * `capSeconds` trims a forgotten timer to a sane duration.
    */
   async stopTimer({ capSeconds = null } = {}) {
+    if (this.privateMode) {
+      if (!this.timer) return null;
+      const t = this.timer;
+      const seconds = Math.max(60, capSeconds == null ? this.elapsedSeconds() : Math.min(this.elapsedSeconds(), capSeconds));
+      const entry = {
+        ...t, id: `timer-${t.id || t.startedAt}`, date: isoOf(new Date(t.startedAt)),
+        seconds, endedAt: t.startedAt + seconds * 1000, rate: null,
+        invoicedAt: null, lockedRate: null, lockedRounding: null,
+        lockedMinimum: null, lockedCurrency: null,
+        createdAt: t.startedAt, updatedAt: t.startedAt + seconds * 1000,
+      };
+      const key = monthKeyOf(entry.date);
+      const entries = await this.loadMonth(key);
+      await this.#persistMonth(key, [...entries.filter(e => e.id !== entry.id), entry]);
+      this.#stage({ kind: 'kv', key: KV.timer, method: 'PUT', value: null });
+      return entry;
+    }
     if (!this.timer) return null;
     const t = this.timer;
     const elapsed = this.elapsedSeconds();
@@ -1909,7 +2041,7 @@ class Store extends EventTarget {
     this.timer = null;
     let entry;
     try {
-      entry = await this.addEntry({
+      entry = await this._addEntry({
         date: isoOf(new Date(t.startedAt)),
         projectId: t.projectId,
         task: t.task,
@@ -2073,11 +2205,11 @@ class Store extends EventTarget {
           const name = item.client || 'Imported';
           client = findClient(name);
           if (!client) {
-            client = await this.addClient({ name, slot: (this.clients.length % 8) + 1 });
+            client = await this._addClient({ name, slot: (this.clients.length % 8) + 1 });
             clientsCreated += 1;
           }
         }
-        project = await this.addProject({ clientId: client.id, name: item.project, billable: item.billable });
+        project = await this._addProject({ clientId: client.id, name: item.project, billable: item.billable });
         projectsCreated += 1;
       }
       resolved.push({ item, projectId: project.id });
@@ -2152,9 +2284,9 @@ class Store extends EventTarget {
     // and overwrite the logo an invoice issued a moment ago points at.
     let stamp = Date.now();
     if (this.settings.businessLogo === logoPath(stamp, ext)) stamp += 1;
-    const path = logoPath(stamp, ext);
-    await puter.fs.write(path, blob, { createMissingParents: true });
-    await this.updateSettings({ businessLogo: path });
+    const path = logoPath(this.privateMode ? `${stamp}-${crypto.randomUUID()}` : stamp, ext);
+    await (this.privateMode ? this.storage : puter).fs.write(path, blob, { createMissingParents: true });
+    await this._updateSettings({ businessLogo: path });
     return path;
   }
 
@@ -2166,6 +2298,7 @@ class Store extends EventTarget {
    */
   async readLogo(path) {
     if (!isLogoPath(path)) return null;
+    if (this.privateMode) return this.storage.fs.read(path);
     try {
       const out = await puter.fs.read(path);
       return out instanceof Blob ? out : null;
@@ -2185,6 +2318,24 @@ class Store extends EventTarget {
   async writeBackup(now = Date.now()) {
     const date = isoOf(new Date(now));
     const text = JSON.stringify(await this.exportAll());
+    if (this.privateMode) {
+      const path = backupPath(date);
+      try { await this.storage.fs.read(path); }
+      catch (error) { if (error?.code !== 'ENOENT' && error?.code !== 'subject_does_not_exist') throw error; }
+      const entry = { date, size: new Blob([text]).size };
+      const next = [...this.backups.filter(b => b.date !== date), entry].sort((a, b) => a.date.localeCompare(b.date));
+      const pruned = next.splice(0, Math.max(0, next.length - BACKUP_KEEP));
+      for (const b of pruned) {
+        const old = backupPath(b.date);
+        try { await this.storage.fs.read(old); }
+        catch (error) { if (error?.code !== 'ENOENT' && error?.code !== 'subject_does_not_exist') throw error; }
+        this.#stage({ kind: 'file', path: old, method: 'DELETE' });
+      }
+      this.backups = next;
+      this.#stage({ kind: 'file', path, method: 'PUT', value: text });
+      this.#stage({ kind: 'kv', key: KV.backups, method: 'PUT', value: next });
+      return entry;
+    }
     await puter.fs.write(backupPath(date), text, { createMissingParents: true });
     const entry = { date, size: text.length };
     // A second snapshot on the same day overwrites the same file, so the
@@ -2226,7 +2377,7 @@ class Store extends EventTarget {
 
   /** Parsed contents of one stored snapshot. */
   async readBackup(date) {
-    const blob = await puter.fs.read(backupPath(date));
+    const blob = await (this.privateMode ? this.storage : puter).fs.read(backupPath(date));
     return JSON.parse(await blob.text());
   }
 
@@ -2272,6 +2423,32 @@ class Store extends EventTarget {
     const months = Object.keys(entriesByMonth)
       .filter((k) => /^\d{4}-(0[1-9]|1[0-2])$/.test(k))
       .sort();
+    if (this.privateMode) {
+      // Establish document baselines, never stat/list revisions. All files,
+      // indexes and the timer replacement commit together or not at all.
+      const allMonths = [...new Set([...this.months, ...months])];
+      for (const key of allMonths) await this.loadMonth(key);
+      for (const key of allMonths) {
+        if (months.includes(key)) {
+          const rows = asArray(entriesByMonth[key]).slice().sort(byEntryOrder);
+          this.#monthCache.set(key, rows);
+          this.#stage({ kind: 'file', path: monthPath(key), method: 'PUT', value: JSON.stringify(rows) });
+        } else {
+          this.#monthCache.delete(key);
+          this.#stage({ kind: 'file', path: monthPath(key), method: 'DELETE' });
+        }
+      }
+      this.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}), updatedAt: stampFor(this.settings) };
+      this.clients = asArray(data.clients);
+      this.projects = asArray(data.projects);
+      this.invoices = asArray(data.invoices);
+      this.months = months;
+      if (this.timer && !this.projects.some(p => p.id === this.timer.projectId)) this.timer = null;
+      for (const prop of ['settings', 'clients', 'projects', 'invoices', 'months', 'timer']) {
+        this.#stage({ kind: 'kv', key: KV[prop], method: 'PUT', value: this[prop] });
+      }
+      return;
+    }
     // Write files first, then indexes: a crash mid-way leaves orphan files
     // (harmless) rather than an index pointing at nothing.
     for (const key of months) {
@@ -2339,9 +2516,9 @@ function monthKeysBetweenIndexed(index, fromISO, toISO) {
   return index.filter((k) => k >= from && k <= to);
 }
 
-export const store = new Store();
+export const store = new Store(storage);
 
 /** Fresh instance for tests; the app itself uses the singleton above. */
-export function createStore() {
-  return new Store();
+export function createStore(storage = null) {
+  return new Store(storage);
 }

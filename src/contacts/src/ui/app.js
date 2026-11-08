@@ -2,6 +2,8 @@
 // store state and wires every interaction (selection, search, sort, filters,
 // theme, import/export, context menus, keyboard shortcuts).
 import { store } from '../store.js'
+import { privateMode } from '../storage.js'
+import { mountPrivateStatus } from '../private-status.js'
 import { toast, progressToast } from '../toast.js'
 import { icons } from '../icons.js'
 import { track } from '../analytics.js'
@@ -26,6 +28,8 @@ import { filterContacts, sortContacts, allTags, SORT_KEYS } from '../search.js'
 import { escapeHtml, escapeAttr } from '../format.js'
 import { contactToVCard, contactsToVCard, vCardToContacts } from '../vcard.js'
 import { setPref, getPref } from '../env.js'
+
+const bulkFailureRecovery = privateMode ? 'export drafts before manually reloading' : 'try again for the rest'
 
 const SORT_LABELS = {
   first: 'First name',
@@ -133,13 +137,13 @@ async function copyText(value, field = 'other') {
 
 function exportAll() {
   if (!store.all.length) return toast('No contacts to export', 'info')
-  downloadFile('contacts.vcf', contactsToVCard(sortContacts(store.all, 'last')))
+  downloadFile('contacts.vcf', contactsToVCard(sortContacts(store.all, 'last'), { preserveIds: privateMode }))
   toast(`Exported ${store.all.length} contact${store.all.length === 1 ? '' : 's'}`, 'success')
 }
 
 function exportOne(contact) {
   const safe = (displayName(contact) || 'contact').replace(/[^\w.-]+/g, '_')
-  downloadFile(`${safe}.vcf`, contactToVCard(contact))
+  downloadFile(`${safe}.vcf`, contactToVCard(contact, { preserveIds: privateMode }))
   toast('vCard exported', 'success')
 }
 
@@ -197,13 +201,17 @@ async function importFiles(files, via) {
       await nextFrame()
     }
     let parsed = []
-    for (const text of texts) parsed = parsed.concat(vCardToContacts(text))
+    for (const text of texts) parsed = parsed.concat(vCardToContacts(text, { preserveIds: privateMode }))
     if (!parsed.length) return toast('No contacts found in that file', 'error')
-    const { written, skipped } = await store.importMany(parsed, {
+    const { written, skipped, failed = 0 } = await store.importMany(parsed, {
       onProgress: (done, total) =>
         progress.update(`Importing ${count(done)} of ${count(total)}…`, total ? done / total : 1),
     })
     progress.done()
+    if (failed) {
+      toast(`Imported ${written}, ${failed} failed, ${skipped} skipped. Keep the source file; export drafts before manually reloading.`, 'error')
+      return
+    }
     if (!written) {
       toast(
         skipped ? 'Already in your address book — nothing new to import' : 'Could not import that file',
@@ -235,7 +243,7 @@ async function undoDelete(contacts) {
     })
     progress.done()
     if (saved && contacts.length === 1) store.setUI({ selectedId: contacts[0].id })
-    if (failed) toast(`Restored ${saved} of ${contacts.length} — try again for the rest`, 'error')
+    if (failed) toast(`Restored ${saved} of ${contacts.length} — ${bulkFailureRecovery}`, 'error')
     else toast(contacts.length === 1 ? 'Contact restored' : `Restored ${contacts.length} contacts`, 'success')
   } catch (_e) {
     toast('Could not restore', 'error')
@@ -340,7 +348,7 @@ function openAccountMenu(btn) {
     label: 'Theme',
     items: [themeItem('System', 'system'), themeItem('Light', 'light'), themeItem('Dark', 'dark')],
   })
-  if (!isPuterApp()) {
+  if (!privateMode && !isPuterApp()) {
     items.push('-', {
       label: 'Sign out',
       danger: true,
@@ -414,7 +422,7 @@ async function renameTagFlow(name) {
     const after = store.ui.tag
     const undo = { label: 'Undo', onClick: () => undoRetag(snapshot, { from: after, to: before }) }
     if (failed) {
-      toast(`Renamed on ${changed} of ${total} contacts — try again for the rest`, 'error', 8000, changed ? undo : undefined)
+      toast(`Renamed on ${changed} of ${total} contacts — ${bulkFailureRecovery}`, 'error', 8000, changed ? undo : undefined)
     } else {
       toast(`Renamed “${name}” to “${next}”`, 'success', 6000, undo)
     }
@@ -440,7 +448,7 @@ async function deleteTagFlow(name) {
     const after = store.ui.tag // see renameTagFlow on why this is captured here
     const undo = { label: 'Undo', onClick: () => undoRetag(snapshot, { from: after, to: before }) }
     if (failed) {
-      toast(`Removed from ${changed} of ${total} contacts — try again for the rest`, 'error', 8000, changed ? undo : undefined)
+      toast(`Removed from ${changed} of ${total} contacts — ${bulkFailureRecovery}`, 'error', 8000, changed ? undo : undefined)
     } else {
       toast(`Tag “${name}” deleted`, 'success', 6000, undo)
     }
@@ -616,7 +624,7 @@ async function bulkDelete() {
     if (n < ids.length) {
       const deleted = snapshot.filter((c) => !store.get(c.id))
       const undo = { label: 'Undo', onClick: () => undoDelete(deleted) }
-      toast(`Deleted ${n} of ${ids.length} — try again for the rest`, 'error', 8000, n ? undo : undefined)
+      toast(`Deleted ${n} of ${ids.length} — ${bulkFailureRecovery}`, 'error', 8000, n ? undo : undefined)
       return
     }
     store.exitSelectMode()
@@ -634,7 +642,7 @@ async function bulkDelete() {
 function bulkExport() {
   const list = [...store.ui.checked].map((id) => store.get(id)).filter(Boolean)
   if (!list.length) return
-  downloadFile('contacts.vcf', contactsToVCard(list))
+  downloadFile('contacts.vcf', contactsToVCard(list, { preserveIds: privateMode }))
   toast(`Exported ${list.length} contact${list.length === 1 ? '' : 's'}`, 'success')
 }
 
@@ -986,7 +994,7 @@ function shellHtml() {
         </div>
         <div class="topbar__actions">
           <button class="icon-btn" data-action="account" title="Account menu" aria-label="Account menu">${icons.user}</button>
-          <button class="btn btn--soft btn--sm" data-action="smart-add" title="Smart add" aria-label="Smart add">${icons.sparkles}<span class="hide-sm">Smart add</span></button>
+          <button class="btn btn--soft btn--sm" data-action="smart-add" ${privateMode ? 'disabled title="Smart Add / AI is unavailable in private mode"' : 'title="Smart add"'} aria-label="Smart add">${icons.sparkles}<span class="hide-sm">Smart add</span></button>
           <button class="btn btn--primary btn--sm" data-action="new" title="New contact" aria-label="New contact">${icons.plus}<span class="hide-xs">New</span></button>
         </div>
       </header>
@@ -1030,6 +1038,7 @@ function shellHtml() {
 export function mountApp(root, { email = '' } = {}) {
   userEmail = email
   root.innerHTML = shellHtml()
+  if (privateMode) mountPrivateStatus(root)
   root.removeAttribute('aria-busy')
 
   els = {

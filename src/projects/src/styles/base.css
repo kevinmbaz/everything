@@ -67,6 +67,16 @@ a { color: var(--accent); text-decoration: none; }
   overflow: hidden;
 }
 
+.private-storage-status {
+  flex-shrink: 0;
+  padding: 8px 20px;
+  font-size: 13px;
+  background: var(--accent-wash);
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.private-storage-status.error { color: #a52a22; background: #fff0e8; font-weight: 600; }
+
 .view-wrap {
   flex: 1;
   min-height: 0;

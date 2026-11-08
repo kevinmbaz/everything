@@ -11,6 +11,7 @@ import { initShortcuts } from './shortcuts.js';
 import { store } from '../lib/store.js';
 import { wipeSampleData } from '../lib/sample.js';
 import { fmtTimer, todayISO } from '../lib/time.js';
+import { isPrivateStorage } from '../lib/storage.js';
 import { isPuterApp } from '../lib/env.js';
 import { timerView } from '../views/timer.js';
 import { timesheetView } from '../views/timesheet.js';
@@ -147,7 +148,7 @@ export function mountShell(appRoot) {
       el('span.user-avatar', {}, username.charAt(0).toUpperCase()),
       el('span.name', { title: username }, username),
       // Inside Puter, the platform owns the session; no sign-out here.
-      !isPuterApp() && el('button.icon-btn', {
+      !isPrivateStorage && !isPuterApp() && el('button.icon-btn', {
         html: icon('logout', 18, 2),
         'aria-label': 'Sign out',
         title: 'Sign out',

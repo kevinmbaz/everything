@@ -2,6 +2,7 @@ import './styles/index.css';
 import { el } from './ui/dom.js';
 import { icon } from './ui/icons.js';
 import { store } from './lib/store.js';
+import { isPrivate } from './lib/storage.js';
 import { applyTheme } from './ui/theme.js';
 import { mountShell } from './ui/shell.js';
 import { toast } from './ui/toast.js';
@@ -10,6 +11,20 @@ import { authView } from './views/auth.js';
 import { offlineEnabled, setOfflineEnabled, readSnapshot, serializeSnapshot, writeSnapshot } from './lib/snapshot.js';
 
 const appRoot = document.getElementById('app');
+
+if (isPrivate) window.addEventListener('invoicing-storage-conflict', () => {
+  if (document.getElementById('storage-conflict')) return;
+  // Keep the editor intact: reloading automatically would discard the very
+  // changes this warning asks the user to rescue. The adapter blocks writes.
+  document.body.prepend(el('div', {
+    id: 'storage-conflict', role: 'alert',
+    style: { position: 'fixed', top: '0', left: '0', right: '0', zIndex: '10000',
+      padding: '16px', background: '#fff3cd', color: '#332600',
+      borderBottom: '2px solid #a46b00', display: 'flex', gap: '16px', alignItems: 'center' },
+  },
+  el('span', {}, 'Saving stopped: this data changed on another device. Copy your unsaved changes, then reload before saving.'),
+  el('button.btn', { type: 'button', onclick: () => location.reload() }, 'Reload')));
+});
 
 function showError(title, message, onRetry) {
   appRoot.replaceChildren(el('div.auth-view', {},
@@ -52,7 +67,7 @@ function watchForNetwork() {
     // inside init() and was swallowed below, so the banner kept saying
     // "changes need a connection" on a device that had one, for good. Only a
     // reload can load the SDK; say so, once per event, and offer it.
-    if (typeof puter === 'undefined') {
+    if (!isPrivate && typeof puter === 'undefined') {
       toast('Back online. Reload to reconnect to your cloud', {
         icon: 'wifi',
         action: { label: 'Reload', onClick: () => location.reload() },
@@ -61,7 +76,7 @@ function watchForNetwork() {
     }
     try {
       await store.reconnect();
-      toast('Back online: showing your cloud again', { icon: 'circleCheck' });
+      toast(isPrivate ? 'Back online: connected to your Jetson storage' : 'Back online: showing your cloud again', { icon: 'circleCheck' });
       keepSnapshot();
       store.processRecurringDue().catch(() => {});
     } catch {
@@ -117,7 +132,11 @@ function withTimeout(promise, ms) {
 }
 
 async function start() {
-  if (typeof puter === 'undefined') {
+  if (isPrivate) {
+    await boot();
+    return;
+  }
+  if (!isPrivate && typeof puter === 'undefined') {
     if (bootOffline()) return;
     showError('Could not reach Puter', 'The Puter SDK failed to load. Check your connection and try again.', () => location.reload());
     return;
@@ -147,7 +166,9 @@ async function boot() {
   } catch (err) {
     console.error(err);
     if (bootOffline()) return;
-    showError('Could not load your data', 'Something went wrong talking to your Puter cloud.', () => location.reload());
+    showError('Could not load your data', isPrivate
+      ? 'Could not reach your Jetson storage. Check that the Jetson and Tailscale are connected, then reload. No cloud service is used.'
+      : 'Something went wrong talking to your Puter cloud.', () => location.reload());
     return;
   }
 

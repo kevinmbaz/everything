@@ -7,6 +7,7 @@ import { todayISO, addDays, nextWeekday, relativeDue } from '../lib/dates.js';
 import { FREQS, WEEKDAY_LABELS } from '../lib/recur.js';
 import { REMINDER_OFFSETS, describeReminder } from '../lib/reminders.js';
 import { uid } from '../lib/util.js';
+import { trackPrivateDraft } from '../lib/private-draft.js';
 
 /**
  * Add/edit sheet. openTaskForm({ task })   → edit
@@ -373,6 +374,7 @@ export function openTaskForm({ task = null, listId = null, due = null, prefill =
   // Enter in the title input calls save() directly, so disabling the
   // button alone doesn't stop key auto-repeat from filing the task twice.
   let saving = false;
+  let savedId = task?.id || null;
   async function save() {
     if (saving) return;
     if (!titleInput.value.trim()) {
@@ -382,14 +384,15 @@ export function openTaskForm({ task = null, listId = null, due = null, prefill =
     }
     saving = true;
     saveBtn.disabled = true;
+    const submitted = JSON.stringify(draft);
     const data = {
       ...draft,
       title: titleInput.value,
       subtasks: draft.subtasks.filter((s) => s.title.trim()),
     };
     try {
-      if (editing) await store.updateTask(task.id, data);
-      else await store.addTask(data);
+      if (savedId) await store.updateTask(savedId, data);
+      else savedId = (await store.addTask(data))?.id;
     } catch (err) {
       console.error(err);
       // A full cloud still keeps (and queues) the change, so the form is
@@ -403,6 +406,12 @@ export function openTaskForm({ task = null, listId = null, due = null, prefill =
       }
       modal.close();
       toast(err.message, { icon: 'cloud', duration: 5000 });
+      return;
+    }
+    tracker.acknowledge(submitted);
+    if (store.isPrivate && JSON.stringify(draft) !== submitted) {
+      saving = false;
+      saveBtn.disabled = false;
       return;
     }
     modal.close();
@@ -508,6 +517,11 @@ export function openTaskForm({ task = null, listId = null, due = null, prefill =
   dateInput.id = 'tf-date';
   timeInput.id = 'tf-time';
 
-  const modal = openModal({ title: editing ? 'Edit task' : 'New task', content: body });
+  // A transferred draft has never been saved; its prefill is not a clean baseline.
+  const tracker = trackPrivateDraft(store, body, () => JSON.stringify(draft), {
+    initiallyDirty: !editing && !!prefill,
+  });
+  const modal = openModal({ title: editing ? 'Edit task' : 'New task', content: body,
+    onClose: () => tracker.dispose() });
   return modal;
 }

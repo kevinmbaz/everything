@@ -114,6 +114,10 @@ export function openRestorePoints({ projectId = null } = {}) {
         : await store.listSnapshotProjects();
     } catch (err) {
       console.error(err);
+      clear(list);
+      hint.textContent = 'Could not load restore points. Check your connection and try again; your saved copies have not been replaced.';
+      list.append(el('button.btn.btn-ghost', { onclick: render }, 'Retry'));
+      return;
     }
     clear(list);
     if (!rows.length) {

@@ -8,6 +8,7 @@ import { el } from './dom.js';
 import { openModal } from './modal.js';
 import { toast } from './toast.js';
 import { field, fieldError, nativeError, projectSelect, switchField } from './fields.js';
+import { trackPrivateDraft } from './private-status.js';
 import { store } from '../lib/store.js';
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -51,6 +52,7 @@ export function openTimerEdit() {
         return;
       }
       save.disabled = true;
+      const generation = draft.capture();
       try {
         await store.retagTimer({
           projectId: project.value,
@@ -64,6 +66,12 @@ export function openTimerEdit() {
         toast('Could not save, check your connection', { icon: 'wifiOff' });
         return;
       }
+      if (store.privateMode && !draft.acknowledge(generation)) {
+        save.disabled = false;
+        toast('Earlier version saved to Jetson; newer edits are still unsaved');
+        return;
+      }
+      draft.dispose();
       modal.close();
       toast('Timer updated');
     },
@@ -78,5 +86,6 @@ export function openTimerEdit() {
     save
   );
 
-  const modal = openModal({ title: 'Edit timer', content: form });
+  const draft = trackPrivateDraft(form, store);
+  const modal = openModal({ title: 'Edit timer', content: form, onClose: () => draft.dispose() });
 }

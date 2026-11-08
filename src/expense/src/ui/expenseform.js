@@ -18,7 +18,7 @@ import { previewURL, receiptURL, invalidateReceipt, isPdf, openReceiptViewer } f
 import { formatBytes } from '../lib/util.js';
 
 export function openExpenseForm({ expense = null, prefill = {}, receiptFile = null, ocr = null, onSaved = null, onDeleted = null } = {}) {
-  const editing = !!expense;
+  let editing = !!expense;
   const base = { date: todayISO(), currency: store.settings.baseCurrency, paymentMethod: 'Card', ...(expense || {}), ...prefill };
   let pendingFile = receiptFile;
   let removeReceipt = false;
@@ -82,13 +82,13 @@ export function openExpenseForm({ expense = null, prefill = {}, receiptFile = nu
           thumb,
           el('div.grow', {},
             el('div.title.truncate', {}, name),
-            el('div.sub', {}, [pendingFile ? 'Ready to upload' : 'Stored in your Puter drive', size].filter(Boolean).join(', '))
+            el('div.sub', {}, [pendingFile ? 'Ready to upload' : store.sdk?.mode === 'private' ? 'Stored on Jetson' : 'Stored in your Puter drive', size].filter(Boolean).join(', '))
           ),
           hasStored && !pendingFile && el('button.icon-btn', { type: 'button', html: icon('eye', 18, 2), 'aria-label': 'View receipt', onclick: () => openReceiptViewer(expense) }),
           el('button.icon-btn', { type: 'button', html: icon('swap', 18, 2), 'aria-label': 'Replace receipt', title: 'Replace', onclick: () => fileInput.click() }),
           el('button.icon-btn.danger', {
             type: 'button', html: icon('x', 18, 2), 'aria-label': 'Remove receipt', title: 'Remove',
-            onclick: () => { pendingFile = null; removeReceipt = true; renderReceipt(); },
+            onclick: () => { pendingFile = null; removeReceipt = true; renderReceipt(); receiptPanel.dispatchEvent(new Event('change', { bubbles: true })); },
           })
         )
       );
@@ -136,6 +136,7 @@ export function openExpenseForm({ expense = null, prefill = {}, receiptFile = nu
     novalidate: true,
     onsubmit: async (e) => {
       e.preventDefault();
+      if (saveBtn.disabled) return;
       const amt = parseAmount(amount.value);
       let bad = false;
       merchantErr.show(merchant.value.trim() ? null : 'Enter a merchant name');
@@ -145,6 +146,9 @@ export function openExpenseForm({ expense = null, prefill = {}, receiptFile = nu
       if (bad) { form.querySelector('[aria-invalid="true"]')?.focus(); return; }
 
       saveBtn.disabled = true;
+      const generation = modal.editGeneration;
+      const submittedFile = pendingFile;
+      const submittedRemoval = removeReceipt;
       saveBtn.textContent = pendingFile ? 'Uploading receipt' : 'Saving';
       const taxVal = parseAmount(tax.value);
       const data = {
@@ -155,7 +159,16 @@ export function openExpenseForm({ expense = null, prefill = {}, receiptFile = nu
       };
       try {
         let saved;
-        if (editing) {
+        if (store.sdk?.mode === 'private') {
+          saved = await store.saveExpenseWithReceipt({ id: expense?.id, data, file: submittedFile, removeReceipt: submittedRemoval });
+          if (expense?.receiptPath && (submittedFile || submittedRemoval)) invalidateReceipt(expense.receiptPath);
+          // The acknowledged create becomes the target for any newer draft.
+          expense = saved;
+          if (pendingFile === submittedFile && removeReceipt === submittedRemoval) {
+            pendingFile = null;
+            removeReceipt = false;
+          }
+        } else if (editing) {
           const patch = { ...data };
           if (removeReceipt && expense.receiptPath) {
             await store.deleteReceipt(expense.receiptPath);
@@ -179,7 +192,13 @@ export function openExpenseForm({ expense = null, prefill = {}, receiptFile = nu
             }
           }
         }
-        modal.close();
+        if (!modal.closeIfUnchanged(generation)) {
+          editing = true;
+          renderReceipt();
+          saveBtn.disabled = false;
+          saveBtn.textContent = 'Save changes';
+          return;
+        }
         toast(editing ? 'Expense updated' : 'Expense saved');
         onSaved?.(saved);
       } catch (err) {
@@ -217,6 +236,10 @@ export function openExpenseForm({ expense = null, prefill = {}, receiptFile = nu
   }
 
   const modal = openModal({ title: editing ? 'Edit expense' : 'New expense', content: form });
+  if (store.sdk?.mode === 'private' && (receiptFile || Object.keys(prefill).length)) {
+    modal.panel.dataset.privateDirty = '1';
+    store.dispatchEvent(new Event('storage-state'));
+  }
   if (!editing && !merchant.value && globalThis.matchMedia?.('(min-width: 640px)').matches) merchant.focus();
   return modal;
 }

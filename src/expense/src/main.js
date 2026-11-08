@@ -7,6 +7,8 @@ import { mountShell } from './ui/shell.js';
 import { shouldOnboard, openOnboarding } from './ui/onboarding.js';
 import { openCapture } from './ui/capture.js';
 import { authView } from './views/auth.js';
+import { isPrivateStorage, prepareStorageBrowser } from './lib/storage.js';
+import { mountPrivateStatus } from './ui/private-status.js';
 
 const appRoot = document.getElementById('app');
 
@@ -21,6 +23,15 @@ function showError(title, message, onRetry) {
 }
 
 async function start() {
+  if (isPrivateStorage) {
+    try {
+      await prepareStorageBrowser();
+      await boot();
+    } catch (err) {
+      showError('Private storage unavailable', err.message, () => location.reload());
+    }
+    return;
+  }
   if (typeof puter === 'undefined') {
     showError('Couldn’t reach Puter', 'The Puter SDK failed to load. Check your connection and try again.', () => location.reload());
     return;
@@ -39,12 +50,13 @@ async function boot() {
     await store.init();
   } catch (err) {
     console.error(err);
-    showError('Couldn’t load your data', navigator.onLine ? 'Something went wrong talking to your Puter cloud.' : 'You appear to be offline.', () => location.reload());
+    showError('Couldn’t load your data', isPrivateStorage ? 'Jetson authorization or storage failed. No cloud or offline fallback is used.' : navigator.onLine ? 'Something went wrong talking to your Puter cloud.' : 'You appear to be offline.', () => location.reload());
     return;
   }
   // Settings win over the pre-paint localStorage value (they sync across devices).
   applyTheme(store.settings.theme || 'system');
   mountShell(appRoot);
+  if (isPrivateStorage) mountPrivateStatus();
   if (shouldOnboard(store)) openOnboarding({ onCapture: () => openCapture() });
   setupOfflineBanner();
 }
@@ -67,7 +79,7 @@ function setupOfflineBanner() {
 
 /* Service worker for the installable shell. Skipped on dev hosts. */
 const isDevHost = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(location.hostname) || location.hostname.endsWith('.localhost');
-if ('serviceWorker' in navigator && !isDevHost && !import.meta.env?.DEV) {
+if (!isPrivateStorage && 'serviceWorker' in navigator && !isDevHost && !import.meta.env?.DEV) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
 }
 

@@ -4,6 +4,7 @@
  * onboarding done so it never nags.
  */
 
+import { isPrivateStorage } from '../lib/storage.js';
 import { el } from '../lib/dom.js';
 import { icon } from './icons.js';
 import { openModal } from './modal.js';
@@ -26,7 +27,7 @@ export function openOnboarding() {
     el('div.empty.onboard-hero', {},
       el('div.empty-icon', { html: icon('board', 30) }),
       el('h3', {}, 'Plan it. Move it. Ship it.'),
-      el('p', {}, 'Kanban boards, timelines, and milestones for small teams. Everything is stored in your own Puter account, never sold or shared.')
+      el('p', {}, isPrivateStorage ? 'Kanban boards, timelines, and milestones stored on your Jetson. Unsaved edits remain only in this tab; keep downloaded ZIP backups. Puter Drive links are unavailable.' : 'Kanban boards, timelines, and milestones for small teams. Everything is stored in your own Puter account, never sold or shared.')
     ),
     el('button.btn.btn-primary.btn-block.btn-tall', {
       type: 'button',

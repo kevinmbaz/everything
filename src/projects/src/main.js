@@ -1,4 +1,6 @@
 import './styles/index.css';
+import { auth, isPrivateStorage } from './lib/storage.js';
+import { preparePrivateBrowser, warnBeforeUnload } from './lib/private-browser.js';
 import { el } from './lib/dom.js';
 import { icon } from './ui/icons.js';
 import { store } from './lib/store.js';
@@ -20,14 +22,20 @@ function showError(title, message, onRetry) {
 }
 
 async function start() {
-  if (typeof puter === 'undefined') {
+  if (isPrivateStorage) {
+    try { await preparePrivateBrowser(); }
+    catch (error) { showError('Private storage unavailable', error.message, () => location.reload()); return; }
+    await boot();
+    return;
+  }
+  if (!auth.isAvailable()) {
     showError('Could not reach Puter', 'The Puter SDK failed to load. Check your connection and try again.', () => location.reload());
     return;
   }
 
   let signedIn = false;
   try {
-    signedIn = await Promise.resolve(puter.auth.isSignedIn());
+    signedIn = await Promise.resolve(auth.isSignedIn());
   } catch {
     signedIn = false;
   }
@@ -44,7 +52,7 @@ async function boot() {
     await store.init();
   } catch (err) {
     console.error(err);
-    showError('Could not load your data', 'Something went wrong talking to your Puter cloud. Check your connection and try again.', () => location.reload());
+    showError('Could not load your data', isPrivateStorage ? 'Could not authenticate or read Jetson storage. No offline or empty workspace was loaded. Check your private connection and retry.' : 'Something went wrong talking to your Puter cloud. Check your connection and try again.', () => location.reload());
     return;
   }
 
@@ -63,7 +71,8 @@ async function boot() {
   // but it no longer needs to interrupt anyone: flushAll() writes the local
   // mirror first, and whatever does not reach Puter goes out from there on
   // the next visit.
-  window.addEventListener('beforeunload', () => {
+  window.addEventListener('beforeunload', (event) => {
+    if (isPrivateStorage) { warnBeforeUnload(event, store); return; }
     if (store.dirty) store.flushAll();
   });
 }
@@ -75,6 +84,7 @@ async function boot() {
  * in a real build: in dev it would sit between Vite and the browser.
  */
 function registerServiceWorker() {
+  if (isPrivateStorage) return;
   if (!import.meta.env?.PROD || !('serviceWorker' in navigator)) return;
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch((err) => console.error(err));

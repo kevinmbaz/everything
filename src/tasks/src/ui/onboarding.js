@@ -27,7 +27,7 @@ export function openOnboarding() {
         style: { background: 'var(--accent-wash)', color: 'var(--accent)' },
       }),
       el('h3', { style: { fontSize: '19px' } }, 'Your day, sorted'),
-      el('p', {}, 'Personal and shared lists, recurring reminders, priorities, and subtasks. Everything lives in your own Puter cloud, never sold or shared.')
+      el('p', {}, store.isPrivate ? 'Personal lists, recurring reminders, priorities and subtasks saved to your private Jetson. Sharing and collaboration are unavailable. Keep the app open until writes are confirmed; offline edits are not stored in this browser.' : 'Personal and shared lists, recurring reminders, priorities, and subtasks. Everything lives in your own Puter cloud, never sold or shared.')
     ),
     el('button.btn.btn-primary.btn-block', {
       type: 'button', style: { padding: '13px' },

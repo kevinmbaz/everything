@@ -20,6 +20,7 @@
  * failed write surfaces through the 'save-error' event.
  */
 
+import { storage, isPrivateStorage } from './storage.js';
 import { uid, safeFileName } from './util.js';
 import { todayISO } from './dates.js';
 import { computeMove, orderForAppend, columnTasks, doneColumnIds } from './board.js';
@@ -70,6 +71,7 @@ export const DEFAULT_COLUMNS = ['To do', 'In progress', 'Done'];
 
 function isMissingFileError(err) {
   const code = err?.code ?? err?.error?.code;
+  if (code === 'ENOENT') return true;
   if (typeof code === 'string' && /does_not_exist|not_found/.test(code)) return true;
   const msg = String(err?.message ?? err?.error?.message ?? '');
   return /no such file|not found|does not exist/i.test(msg);
@@ -224,18 +226,26 @@ export class Store extends EventTarget {
   offline = false;
   /** Projects whose local copy has not reached Puter yet. */
   #outbox = new Set();
+  #attachmentCleanup = new Map(); // delete bytes only after their document commits
   #writes = new Map();       // projectId → the save that is in flight
 
   async init() {
     try {
+      if (isPrivateStorage) this.user = await storage.getUser();
       const [user, settings, projects, trash, templates, views] = await Promise.all([
-        Promise.resolve(puter.auth.getUser()).catch(() => null),
+        isPrivateStorage ? this.user : Promise.resolve(storage.getUser()).catch(() => null),
         this.#kvGet(KV_SETTINGS),
         this.#kvGet(KV_PROJECTS),
         this.#kvGet(KV_TRASH),
         this.#kvGet(KV_TEMPLATES),
         this.#kvGet(KV_VIEWS),
       ]);
+      if (isPrivateStorage) {
+        if (settings !== null && (!settings || typeof settings !== 'object' || Array.isArray(settings))) throw new Error('Invalid settings data');
+        for (const value of [projects, trash, templates, views]) {
+          if (value !== null && !Array.isArray(value)) throw new Error('Invalid workspace index data');
+        }
+      }
       this.user = user;
       if (settings && typeof settings === 'object') this.settings = { ...this.settings, ...settings };
       this.projects = Array.isArray(projects) ? projects : [];
@@ -246,6 +256,7 @@ export class Store extends EventTarget {
       this.#setOffline(false);
       this.#mirrorMeta();
     } catch (err) {
+      if (isPrivateStorage) throw err;
       // No connection: boot from what this device already knows rather than
       // showing the "could not reach Puter" wall.
       const cached = await mirror.get(MIRROR_META);
@@ -268,7 +279,7 @@ export class Store extends EventTarget {
         if (document.visibilityState === 'hidden') this.flushAll();
       });
     }
-    this.#openChannel();
+    if (!isPrivateStorage) this.#openChannel();
     this.#watchConnection();
     await this.#loadOutbox();
   }
@@ -295,6 +306,7 @@ export class Store extends EventTarget {
   }
 
   #watchConnection() {
+    if (isPrivateStorage) return;
     if (typeof window === 'undefined') return;
     window.addEventListener('online', () => this.syncOutbox());
     window.addEventListener('offline', () => this.#setOffline(true));
@@ -331,6 +343,7 @@ export class Store extends EventTarget {
    * overwriting it.
    */
   async syncOutbox() {
+    if (isPrivateStorage) return 0;
     if (!this.#outbox.size) {
       this.#setOffline(false);
       return 0;
@@ -402,7 +415,7 @@ export class Store extends EventTarget {
 
   /** True while any project has an unsaved (or failed) write. */
   get dirty() {
-    return this.#pendingSaves.size > 0;
+    return this.#pendingSaves.size > 0 || (isPrivateStorage && storage.dirty);
   }
 
   /**
@@ -417,16 +430,16 @@ export class Store extends EventTarget {
   // ---- kv helpers ------------------------------------------------------
 
   async #kvGet(key) {
-    const raw = await puter.kv.get(key);
+    const raw = await storage.kv.get(key);
     if (raw === null || raw === undefined) return null;
     if (typeof raw === 'string') {
-      try { return JSON.parse(raw); } catch { return null; }
+      try { return JSON.parse(raw); } catch (error) { if (isPrivateStorage) throw error; return null; }
     }
     return raw;
   }
 
   async #kvSet(key, value) {
-    await puter.kv.set(key, JSON.stringify(value));
+    await storage.kv.set(key, JSON.stringify(value));
   }
 
   /**
@@ -436,6 +449,12 @@ export class Store extends EventTarget {
    * merge would resurrect what was just removed.
    */
   async #saveProjectIndex({ removed = [] } = {}) {
+    if (isPrivateStorage) {
+      // Do not merge a freshly read index into stale local state or refresh
+      // its CAS revision. The index loaded at init is the write baseline.
+      await this.#kvSet(KV_PROJECTS, this.projects);
+      return;
+    }
     const remote = await this.#kvGet(KV_PROJECTS).catch(() => null);
     const byId = new Map((Array.isArray(remote) ? remote : []).map((e) => [e.id, e]));
     for (const entry of this.projects) byId.set(entry.id, entry);
@@ -492,7 +511,7 @@ export class Store extends EventTarget {
     } catch (err) {
       this.#docs.delete(finalDoc.id);
       this.projects = this.projects.filter((p) => p.id !== finalDoc.id);
-      puter.fs.delete(projectPath(finalDoc.id)).catch(() => {});
+      storage.fs.delete(projectPath(finalDoc.id)).catch(() => {});
       throw err;
     }
     this.#emit('change', { scope: 'projects' });
@@ -527,7 +546,7 @@ export class Store extends EventTarget {
     try {
       // The stamp is read alongside the document, so the very first save
       // already knows what it is allowed to overwrite.
-      const [blob, current] = await Promise.all([puter.fs.read(path), this.#stat(path)]);
+      const [blob, current] = await Promise.all([storage.fs.read(path), this.#stat(path)]);
       doc = JSON.parse(await blob.text());
       stamp = current;
       this.#setOffline(false);
@@ -684,6 +703,7 @@ export class Store extends EventTarget {
     if (this.#pendingSaves.has(id)) {
       clearTimeout(this.#saveTimers.get(id));
       await this.#saveNow(id);
+      if (isPrivateStorage && this.hasPendingSave(id)) throw new Error('Unsaved edits must be saved or exported before deleting');
     }
     this.#forgetProject(id);
 
@@ -721,6 +741,7 @@ export class Store extends EventTarget {
 
   /** Irreversible: drops the document, its attachments, and both entries. */
   async purgeProject(id) {
+    if (isPrivateStorage && (this.dirty || storage.conflict)) throw new Error('Unsaved edits must be saved or exported before purging');
     this.#forgetProject(id);
     const wasListed = this.projects.some((p) => p.id === id);
     this.projects = this.projects.filter((p) => p.id !== id);
@@ -729,9 +750,9 @@ export class Store extends EventTarget {
     await this.#saveTrashIndex();
     this.#emit('change', { scope: 'projects' });
     // Best-effort cleanup; a dangling file is invisible without its index entry.
-    puter.fs.delete(projectPath(id)).catch(() => {});
-    puter.fs.delete(`${DATA_DIR}/attachments/${id}`, { recursive: true }).catch(() => {});
-    puter.fs.delete(snapshotDir(id), { recursive: true }).catch(() => {});
+    storage.fs.delete(projectPath(id)).catch(() => {});
+    storage.fs.delete(`${DATA_DIR}/attachments/${id}`, { recursive: true }).catch(() => {});
+    storage.fs.delete(snapshotDir(id), { recursive: true }).catch(() => {});
   }
 
   /** Called on boot: trash is a grace period, not a second archive. */
@@ -745,9 +766,9 @@ export class Store extends EventTarget {
 
   /** What the file on disk looks like right now, or null when unknowable. */
   async #stat(path) {
-    if (typeof puter.fs?.stat !== 'function') return null;
+    if (typeof storage.fs?.stat !== 'function') return null;
     try {
-      return stampOf(await puter.fs.stat(path));
+      return stampOf(await storage.fs.stat(path));
     } catch (err) {
       // A missing file is not a conflict — it is a first write.
       if (isMissingFileError(err)) return null;
@@ -766,11 +787,16 @@ export class Store extends EventTarget {
   async #writeDoc(doc, { force = false } = {}) {
     const path = projectPath(doc.id);
     const known = this.#stamps.get(doc.id);
+    if (isPrivateStorage) {
+      // Atomic server CAS, not the cloud stat-then-write approximation.
+      await storage.fs.write(path, JSON.stringify(doc));
+      return;
+    }
     if (known && !force) {
       const current = await this.#stat(path);
       if (current && current !== known) throw new ConflictError(doc.id);
     }
-    const result = await puter.fs.write(path, JSON.stringify(doc), { createMissingParents: true });
+    const result = await storage.fs.write(path, JSON.stringify(doc), { createMissingParents: true });
     // Prefer what the write itself reported; stat only when it said nothing.
     this.#stamps.set(doc.id, stampOf(result) ?? await this.#stat(path));
   }
@@ -847,7 +873,7 @@ export class Store extends EventTarget {
       // later still notices a document that moved on in the meantime.
       stamp: this.#stamps.get(projectId) ?? null,
     });
-    this.#outbox.add(projectId);
+    if (!isPrivateStorage) this.#outbox.add(projectId);
     try {
       await this.#snapshotDaily(projectId).catch((err) => console.error(err));
       // The ground can move while the snapshot is taken: the project is
@@ -862,6 +888,10 @@ export class Store extends EventTarget {
         return;
       }
       if (this.#docs.get(projectId) !== doc) return;
+      // Bind cleanup to the document being serialized, not the live queue:
+      // removals added during this write or a DELETE need their own commit.
+      const cleanup = this.#attachmentCleanup.get(projectId);
+      const cleanupBatch = [...(cleanup ?? [])];
       await this.#writeDoc(doc, { force });
       this.#conflicts.delete(projectId);
       this.#setOffline(false);
@@ -870,7 +900,7 @@ export class Store extends EventTarget {
       // tab that dies inside the next debounce window would leave a copy
       // marked "sent" that nothing ever replays. Its own timer is already
       // armed; this only stops the record from lying in the meantime.
-      const settled = this.#saveGens.get(projectId) === gen;
+      let settled = this.#saveGens.get(projectId) === gen;
       if (settled) this.#outbox.delete(projectId);
       mirror.set(mirrorDocKey(projectId), {
         doc,
@@ -878,6 +908,14 @@ export class Store extends EventTarget {
         pending: !settled,
         stamp: this.#stamps.get(projectId) ?? null,
       });
+      if (settled && isPrivateStorage) {
+        for (const [path, options] of cleanupBatch) {
+          await storage.fs.delete(path, options);
+          cleanup.delete(path);
+        }
+        if (!cleanup?.size) this.#attachmentCleanup.delete(projectId);
+        settled = this.#saveGens.get(projectId) === gen;
+      }
       if (settled) {
         this.#pendingSaves.delete(projectId);
         this.#emit('saved', { projectId });
@@ -890,7 +928,7 @@ export class Store extends EventTarget {
         return;
       }
       console.error(err);
-      if (looksOffline(err)) {
+      if (!isPrivateStorage && looksOffline(err)) {
         // Not a failure to report as one: the change is on this device and
         // will go out when there is a connection.
         this.#setOffline(true);
@@ -913,7 +951,7 @@ export class Store extends EventTarget {
    * logged and the save goes ahead.
    */
   async #snapshotDaily(projectId) {
-    if (typeof puter.fs?.readdir !== 'function') return;
+    if (typeof storage.fs?.readdir !== 'function') return;
     const today = todayISO();
     if (this.#snapshotDays.get(projectId) === today) return;
     this.#snapshotDays.set(projectId, today);
@@ -925,7 +963,7 @@ export class Store extends EventTarget {
     // already moved on, which is exactly the version we do not want.
     let previous = null;
     try {
-      previous = JSON.parse(await (await puter.fs.read(projectPath(projectId))).text());
+      previous = JSON.parse(await (await storage.fs.read(projectPath(projectId))).text());
     } catch (err) {
       if (!isMissingFileError(err)) console.error(err);
       return; // nothing on disk yet: the project is brand new
@@ -945,7 +983,7 @@ export class Store extends EventTarget {
       entry: { ...entry, id: projectId },
       doc,
     };
-    await puter.fs.write(
+    await storage.fs.write(
       `${snapshotDir(projectId)}/${name}`,
       JSON.stringify(payload),
       { createMissingParents: true },
@@ -953,9 +991,9 @@ export class Store extends EventTarget {
   }
 
   async #snapshotNames(projectId) {
-    if (typeof puter.fs?.readdir !== 'function') return [];
+    if (typeof storage.fs?.readdir !== 'function') return [];
     try {
-      const items = await puter.fs.readdir(snapshotDir(projectId));
+      const items = await storage.fs.readdir(snapshotDir(projectId));
       return (items ?? [])
         .map((item) => ({
           name: item?.name ?? String(item?.path ?? '').split('/').pop(),
@@ -964,6 +1002,7 @@ export class Store extends EventTarget {
         }))
         .filter((f) => parseSnapshotName(f.name));
     } catch (err) {
+      if (isPrivateStorage) throw err;
       if (!isMissingFileError(err)) console.error(err);
       return [];
     }
@@ -982,11 +1021,12 @@ export class Store extends EventTarget {
    * index — that is the hole a task-level trash cannot close.
    */
   async listSnapshotProjects() {
-    if (typeof puter.fs?.readdir !== 'function') return [];
+    if (typeof storage.fs?.readdir !== 'function') return [];
     let items = [];
     try {
-      items = await puter.fs.readdir(`${DATA_DIR}/snapshots`) ?? [];
+      items = await storage.fs.readdir(`${DATA_DIR}/snapshots`) ?? [];
     } catch (err) {
+      if (isPrivateStorage) throw err;
       if (!isMissingFileError(err)) console.error(err);
       return [];
     }
@@ -1017,7 +1057,7 @@ export class Store extends EventTarget {
     if (!files.length) return 0;
     const { drop } = planSnapshotRetention(files.map((f) => f.name));
     for (const name of drop) {
-      await puter.fs.delete(`${snapshotDir(projectId)}/${name}`).catch(() => {});
+      await storage.fs.delete(`${snapshotDir(projectId)}/${name}`).catch(() => {});
     }
     return drop.length;
   }
@@ -1028,7 +1068,9 @@ export class Store extends EventTarget {
    * comes back with it.
    */
   async restoreSnapshot(projectId, name) {
-    const blob = await puter.fs.read(`${snapshotDir(projectId)}/${name}`);
+    if (isPrivateStorage && (this.dirty || storage.conflict)) throw new Error('Export unsaved edits before restoring a snapshot');
+    const gen = this.#saveGens.get(projectId);
+    const blob = await storage.fs.read(`${snapshotDir(projectId)}/${name}`);
     const payload = JSON.parse(await blob.text());
     const restored = payload?.doc;
     if (!restored || !Array.isArray(restored.tasks)) {
@@ -1045,17 +1087,26 @@ export class Store extends EventTarget {
     }
 
     const doc = { ...restored, id: projectId };
+    if (isPrivateStorage) {
+      if (this.dirty || storage.conflict || this.#saveGens.get(projectId) !== gen) throw new Error('Unsaved edits changed while restoring; export them first');
+      // Keep the current in-memory document until the server accepts CAS.
+      await this.#writeDoc(doc);
+      await this.#settledWrite(projectId);
+      // Edits can arrive even while the restore response is pending. Do not
+      // replace their document or cancel their debounce after acknowledging CAS.
+      if (this.#saveGens.get(projectId) !== gen) throw new Error('Project changed while restoring; local edits were kept. Save or export them before retrying.');
+    }
     clearTimeout(this.#saveTimers.get(projectId));
     this.#saveTimers.delete(projectId);
     // A save that is mid-flight holds the document being replaced; let it
     // land (or fail) before the restore writes over it.
-    await this.#settledWrite(projectId);
+    if (!isPrivateStorage) await this.#settledWrite(projectId);
     this.#pendingSaves.delete(projectId);
     this.#conflicts.delete(projectId);
     this.#outbox.delete(projectId);
     this.#docs.set(projectId, doc);
     // A restore is a deliberate overwrite of whatever is on disk.
-    await this.#writeDoc(doc, { force: true });
+    if (!isPrivateStorage) await this.#writeDoc(doc, { force: true });
     // The mirror follows: an offline read must show what was restored, not
     // the copy it replaced.
     mirror.set(mirrorDocKey(projectId), {
@@ -1087,6 +1138,7 @@ export class Store extends EventTarget {
 
   /** "Reload": drop everything local and take what is on disk. */
   async reloadProject(projectId) {
+    if (isPrivateStorage) throw new Error('Export unsaved edits, then explicitly reload the page');
     clearTimeout(this.#saveTimers.get(projectId));
     this.#saveTimers.delete(projectId);
     // A write still in flight would land the copy being dropped on top of
@@ -1106,6 +1158,7 @@ export class Store extends EventTarget {
 
   /** "Keep mine": overwrite the other copy, deliberately. */
   async forceSave(projectId) {
+    if (isPrivateStorage) throw new Error('Keep mine is disabled; export edits before reloading');
     this.#pendingSaves.add(projectId);
     await this.#saveNow(projectId, { force: true });
     return !this.#conflicts.has(projectId);
@@ -1525,7 +1578,7 @@ export class Store extends EventTarget {
     // per task, and a delete that fails leaves a file nothing points at.
     for (const task of purged) {
       if (task.attachments?.length) {
-        puter.fs.delete(attachmentDir(projectId, task.id), { recursive: true }).catch(() => {});
+        this.#deleteAttachmentBytes(projectId, attachmentDir(projectId, task.id), { recursive: true });
       }
     }
     return purged.map((t) => t.id);
@@ -1983,7 +2036,7 @@ export class Store extends EventTarget {
       type: file.type || '',
       createdAt: Date.now(),
     };
-    await puter.fs.write(
+    await storage.fs.write(
       `${attachmentDir(projectId, taskId)}/${att.id}-${att.name}`,
       file,
       { createMissingParents: true },
@@ -2002,6 +2055,7 @@ export class Store extends EventTarget {
    * loud rather than failing silently.
    */
   addLinkedAttachment(projectId, taskId, item) {
+    if (isPrivateStorage) throw new Error('Puter Drive links are unavailable in private mode; upload the file instead');
     const path = item?.path ?? item?.fullPath ?? null;
     if (!path) throw new Error('That file has no path');
     const att = {
@@ -2028,7 +2082,8 @@ export class Store extends EventTarget {
   }
 
   async readAttachment(projectId, taskId, att) {
-    return puter.fs.read(this.attachmentPath(projectId, taskId, att));
+    if (isPrivateStorage && att.kind === 'link') throw new Error('Puter Drive links are unavailable; upload the original file');
+    return storage.fs.read(this.attachmentPath(projectId, taskId, att));
   }
 
   /** Whether a linked file is still where the link says it is. */
@@ -2037,9 +2092,10 @@ export class Store extends EventTarget {
     // server: asking it whether it is there would be a cross-origin request
     // this app has no business making, so it is taken at its word.
     if (att.kind === 'url') return true;
-    if (typeof puter.fs?.stat !== 'function') return true;
+    if (isPrivateStorage && att.kind === 'link') return false;
+    if (typeof storage.fs?.stat !== 'function') return true;
     try {
-      await puter.fs.stat(this.attachmentPath(projectId, taskId, att));
+      await storage.fs.stat(this.attachmentPath(projectId, taskId, att));
       return true;
     } catch (err) {
       if (isMissingFileError(err)) return false;
@@ -2055,7 +2111,14 @@ export class Store extends EventTarget {
     // Removing a link removes the reference; the file in Drive (or on the web)
     // is not this app's to delete.
     if (att.kind === 'link' || att.kind === 'url') return;
-    puter.fs.delete(`${attachmentDir(projectId, taskId)}/${att.id}-${att.name}`).catch(() => {});
+    this.#deleteAttachmentBytes(projectId, `${attachmentDir(projectId, taskId)}/${att.id}-${att.name}`);
+  }
+
+  #deleteAttachmentBytes(projectId, path, options) {
+    if (!isPrivateStorage) { storage.fs.delete(path, options).catch(() => {}); return; }
+    let cleanup = this.#attachmentCleanup.get(projectId);
+    if (!cleanup) this.#attachmentCleanup.set(projectId, cleanup = new Map());
+    cleanup.set(path, options);
   }
 
   // ---- export / sample data --------------------------------------------
@@ -2071,7 +2134,7 @@ export class Store extends EventTarget {
         docs.push(await this.loadProject(entry.id));
         index.push(entry);
       } catch (err) {
-        if (!isMissingFileError(err)) throw err;
+        if (isPrivateStorage || !isMissingFileError(err)) throw err;
       }
     }
     return {
@@ -2174,7 +2237,7 @@ export class Store extends EventTarget {
             // lookup above still uses what the backup said, since that is
             // what the entry inside the zip is called.)
             const stored = { ...att, id: uid(), name: safeFileName(att.name) };
-            await puter.fs.write(
+            await storage.fs.write(
               `${attachmentDir(doc.id, task.id)}/${stored.id}-${stored.name}`,
               blob,
               { createMissingParents: true },

@@ -35,7 +35,7 @@ export function openOnboarding({ onCapture } = {}) {
       el('div.empty', { style: { padding: '8px 8px 4px' } },
         el('div.empty-icon', { html: icon('scan', 28), style: { background: 'var(--accent-wash)', color: 'var(--accent-strong)' } }),
         el('h3', {}, 'Receipts in, reports out'),
-        el('p', {}, 'Capture receipts and let AI read them, bundle them into reports, and reconcile against your statement. Stored in your own Puter account.')
+        el('p', {}, store.sdk?.mode === 'private' ? 'Upload receipts, enter their fields manually, and reconcile statements. Primary storage is on Jetson; cloud OCR is unavailable.' : 'Capture receipts and let AI read them, bundle them into reports, and reconcile against your statement. Stored in your own Puter account.')
       ),
       el('button.btn.btn-primary.btn-block.btn-lg', { type: 'button', onclick: renderCurrency }, 'Set up my expenses'),
       el('button.btn.btn-outline.btn-block', {
@@ -50,6 +50,7 @@ export function openOnboarding({ onCapture } = {}) {
     const btn = e.currentTarget;
     btn.disabled = true;
     btn.textContent = 'Loading sample data';
+    const generation = modal.editGeneration;
     try {
       const data = sampleDataset(store);
       await store.importAll(data);
@@ -62,7 +63,7 @@ export function openOnboarding({ onCapture } = {}) {
       btn.textContent = 'Explore with sample data';
       return;
     }
-    modal.close();
+    modal.closeIfUnchanged(generation);
     toast('Sample data loaded. Wipe it anytime from the banner', { icon: 'sparkle' });
   }
 
@@ -92,17 +93,28 @@ export function openOnboarding({ onCapture } = {}) {
       el('button.btn.btn-primary.btn-block.btn-lg', {
         type: 'button',
         onclick: async (ev) => {
-          ev.currentTarget.disabled = true;
-          await store.updateSettings({ baseCurrency: picked, onboarded: true }).catch(() => {});
-          modal.close();
+          const button = ev.currentTarget;
+          button.disabled = true;
+          const generation = modal.editGeneration;
+          try { await store.updateSettings({ baseCurrency: picked, onboarded: true }); }
+          catch (err) {
+            if (store.sdk?.mode === 'private') { button.disabled = false; toast('Couldn’t save setup. Your choices are still here.', { icon: 'warn' }); return; }
+          }
+          if (!modal.closeIfUnchanged(generation)) { button.disabled = false; return; }
           if (onCapture) setTimeout(onCapture, 250);
         },
       }, 'Capture my first receipt'),
       el('button.btn.btn-ghost.btn-block', {
         type: 'button', style: { marginTop: '8px' },
-        onclick: async () => {
-          await store.updateSettings({ baseCurrency: picked, onboarded: true }).catch(() => {});
-          modal.close();
+        onclick: async (ev) => {
+          const button = ev.currentTarget;
+          button.disabled = true;
+          const generation = modal.editGeneration;
+          try { await store.updateSettings({ baseCurrency: picked, onboarded: true }); }
+          catch (err) {
+            if (store.sdk?.mode === 'private') { button.disabled = false; toast('Couldn’t save setup. Your choices are still here.', { icon: 'warn' }); return; }
+          }
+          if (!modal.closeIfUnchanged(generation)) button.disabled = false;
         },
       }, 'I’ll add expenses later'),
     ]);

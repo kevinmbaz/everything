@@ -42,6 +42,7 @@ export function mountShell(appRoot) {
   const viewWrap = el('div');
   const main = el('main.main', { id: 'main' }, sampleBanner, viewWrap);
   let currentView = null;
+  let currentHash = location.hash;
 
   function renderSampleBanner() {
     clear(sampleBanner);
@@ -165,7 +166,11 @@ export function mountShell(appRoot) {
   }
 
   function renderRoute() {
-    closeAllModals();
+    if ((store.sdk?.mode === 'private' && currentView?.querySelector('[data-private-dirty]') && !window.confirm('Discard unsaved settings? They have not been saved to Jetson.')) || closeAllModals() === false) {
+      history.replaceState(null, '', currentHash || '#/');
+      return;
+    }
+    currentHash = location.hash;
     const { route, params } = routeFor(location.hash);
     renderNav();
     currentView?.destroy?.();

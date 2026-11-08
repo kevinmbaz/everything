@@ -2,6 +2,7 @@
 // let Puter AI extract structured fields, which then open in the editor for
 // review. This is the app's only use of AI, and it goes through puter.ai.
 import { toast } from '../toast.js'
+import { privateMode } from '../storage.js'
 import { icons } from '../icons.js'
 import { openEditor } from './editor.js'
 import { confirmDialog } from './confirm.js'
@@ -37,6 +38,7 @@ function parseContactJson(text) {
 }
 
 export function openSmartAdd() {
+  if (privateMode) return toast('Smart Add / AI is unavailable in private mode. Add contacts manually or import a local vCard.', 'info')
   const overlay = document.createElement('div')
   overlay.className = 'overlay overlay--editor'
   overlay.innerHTML = `

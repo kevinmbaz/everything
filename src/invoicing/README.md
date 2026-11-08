@@ -2,7 +2,7 @@
 
 Create quotes, invoices, recurring invoices, receipts, and payment links. Deliberately simpler than a full accounting app, and built to feed one: every payment you record can be exported straight into the [Personal Finance](https://github.com/HeyPuter/accountant) app.
 
-Everything is stored in the user's own [Puter](https://developer.puter.com) cloud. There is no server of ours, no database of ours, and no tracking.
+The default deployment stores everything in the user's own [Puter](https://developer.puter.com) cloud. For the optional account-free private deployment, see [Private Jetson storage](PRIVATE-STORAGE.md): records and attachments are stored on the Jetson with Tailscale-controlled access, without loading Puter services. Public sharing and paid email sending are disabled in that mode.
 
 ## Features
 

@@ -37,6 +37,7 @@
  */
 
 import { uid } from './util.js';
+import { storage } from './storage.js';
 import { todayISO, monthKeyOf, isValidISODate, isValidTime } from './dates.js';
 import { nextDue, normalizeRule, reanchorRule } from './recur.js';
 import { buildSharePayload, shareLink } from './share.js';
@@ -325,7 +326,14 @@ export class Store extends EventTarget {
   deletedTasks = [];
   deletedLists = [];
   user = null;
-  deviceId = readDeviceId();
+  deviceId;
+  constructor({ storage } = {}) {
+    super();
+    if (storage) this.cloud = storage;
+    this.deviceId = this.isPrivate ? uid() : readDeviceId();
+  }
+
+  get isPrivate() { return this.cloud?.mode === 'private'; }
   /** Dataset identity: import/wipe mint a new one → others adopt wholesale. */
   epoch = null;
   epochAt = 0;
@@ -340,6 +348,14 @@ export class Store extends EventTarget {
   #onlineBound = false;
 
   async init() {
+    if (this.isPrivate) {
+      if (this.pendingWrites() || this.privateError) throw new Error('Copy unsaved edits before reopening private Tasks.');
+      this.user = await this.cloud.getUser();
+      const docs = await Promise.all(Object.values(KV).map(key => this.cloud.kv.get(key)));
+      this.#adoptCloud(...docs);
+      if (!this.epoch) { this.epoch = uid(); this.epochAt = Date.now(); }
+      return;
+    }
     // Both round-trips start together — the account only has to be settled
     // before the *mirror* is read, since adopting or merging another
     // account's mirror would hand their tasks to whoever signed in next.
@@ -432,6 +448,7 @@ export class Store extends EventTarget {
     this.logMonths = (Array.isArray(doc.logMonths) ? doc.logMonths : [])
       .filter((k) => /^\d{4}-\d{2}$/.test(String(k))).sort();
     this.deletedTasks = normalizeTombstones(doc.deleted);
+    if (this.isPrivate) this.#dropForeignPublications({});
   }
 
   #adoptCloud(sRaw, lRaw, iRaw) {
@@ -552,7 +569,44 @@ export class Store extends EventTarget {
     };
   }
 
+  privateError = null;
+  #privateGeneration = { settings: 0, lists: 0, items: 0 };
+  #privateTail = Promise.resolve();
+
+  async #savePrivate(keys, files = []) {
+    this.#dropForeignPublications({});
+    const generations = {};
+    for (const key of keys) {
+      this.#dirty.add(key);
+      generations[key] = ++this.#privateGeneration[key];
+    }
+    const operations = keys.map(key => ({ kind: 'kv', key: KV[key], method: 'PUT',
+      value: JSON.parse(JSON.stringify(this.#envelope(key))) }));
+    operations.push(...files);
+    this.#emit();
+    this.dispatchEvent(new Event('sync-state'));
+    const run = this.#privateTail.then(async () => {
+      try {
+        // An uncertain write requires copying drafts and explicitly reopening;
+        // never retry a potentially committed transaction with a new identity.
+        if (this.privateError) throw this.privateError;
+        await this.cloud.transaction(operations);
+        for (const key of keys) {
+          if (generations[key] === this.#privateGeneration[key] && !this.privateError) this.#dirty.delete(key);
+        }
+      } catch (err) {
+        this.privateError ||= err;
+        throw err;
+      } finally {
+        this.dispatchEvent(new Event('sync-state'));
+      }
+    });
+    this.#privateTail = run.catch(() => {});
+    return run;
+  }
+
   async #save(key) {
+    if (this.isPrivate) return this.#savePrivate([key]);
     this.#writeMirror();
     this.#emit();
     const wasPending = this.#dirty.size;
@@ -599,6 +653,7 @@ export class Store extends EventTarget {
    * reaches the caller, which is what the rethrow is for.
    */
   async #saveAll(...keys) {
+    if (this.isPrivate) return this.#savePrivate(keys);
     let first = null;
     for (const key of keys) {
       try {
@@ -611,6 +666,7 @@ export class Store extends EventTarget {
   }
 
   async #flushDirty() {
+    if (this.isPrivate) return;
     if (!this.#dirty.size) return;
     const wasPending = this.#dirty.size;
     // Layer the queued offline edits onto the latest cloud state instead of
@@ -650,7 +706,14 @@ export class Store extends EventTarget {
 
   /** How many documents hold changes that have not reached the cloud. */
   pendingWrites() {
-    return this.#dirty.size;
+    return this.#dirty.size + this.#drafts.size;
+  }
+
+  #drafts = new Set();
+  setDraftDirty(token, dirty) {
+    if (!this.isPrivate) return;
+    dirty ? this.#drafts.add(token) : this.#drafts.delete(token);
+    this.dispatchEvent(new Event('sync-state'));
   }
 
   /**
@@ -672,6 +735,7 @@ export class Store extends EventTarget {
    * did; concurrent calls share one in-flight refresh.
    */
   async refreshFromCloud({ force = false } = {}) {
+    if (this.isPrivate) return false;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
     if (this.#refreshPromise) return this.#refreshPromise;
     if (!force && Date.now() - this.#lastFetchAt < REFRESH_MIN_MS) return false;
@@ -832,6 +896,7 @@ export class Store extends EventTarget {
   }
 
   #writeMirror() {
+    if (this.isPrivate) return;
     try {
       localStorage.setItem(MIRROR_KEY, JSON.stringify({
         v: 2,
@@ -866,6 +931,7 @@ export class Store extends EventTarget {
   }
 
   async addList(data) {
+    if (this.isPrivate && this.privateError) throw this.privateError;
     // Strictly past every existing order — dragging a list to the end
     // assigns prev.order + 1, so lists.length alone can collide with it.
     const order = this.lists.reduce((m, l) => Math.max(m, l.order + 1), 0);
@@ -964,6 +1030,16 @@ export class Store extends EventTarget {
   }
 
   async addTask(data) {
+    if (this.isPrivate && this.privateError) throw this.privateError;
+    if (this.isPrivate && !this.lists.length) {
+      if (!String(data.title || '').trim()) throw new Error('A task needs a title');
+      const list = normalizeList({ name: 'Personal', icon: 'user', slot: 1 });
+      const task = normalizeTask({ ...data, id: uid(), listId: list.id });
+      this.lists.push(list);
+      this.tasks.push(task);
+      await this.#saveAll('lists', 'items');
+      return task;
+    }
     let listId = data.listId || this.settings.defaultListId || this.lists[0]?.id;
     // Never create an orphaned task: stale ids (deleted list, wiped data)
     // fall back to the first list, and an empty account gets a default one.
@@ -980,6 +1056,7 @@ export class Store extends EventTarget {
 
   async updateTask(id, patch) {
     const task = this.taskById(id);
+    if (!task && this.isPrivate) throw new Error('This task was archived or removed. Copy your edits before reopening.');
     if (!task) return;
     const updated = normalizeTask({ ...task, ...patch, updatedAt: bump(task.updatedAt) });
     // Deliberately moving the due date re-points a monthly/yearly rule at
@@ -1190,6 +1267,7 @@ export class Store extends EventTarget {
    * Runs on boot, fire-and-forget; the hot document stays small forever.
    */
   async archiveOldCompleted({ now = Date.now() } = {}) {
+    if (this.isPrivate) return this.#archivePrivate(now);
     const cutoff = now - ARCHIVE_DAYS * 86400000;
     const old = this.tasks.filter((t) => t.done && (t.completedAt || 0) < cutoff);
     if (!old.length) return 0;
@@ -1245,10 +1323,58 @@ export class Store extends EventTarget {
     return gone.size;
   }
 
+  #archivingPrivate = false;
+  async #archivePrivate(now) {
+    if (this.#archivingPrivate || this.pendingWrites() || this.privateError) return 0;
+    this.#archivingPrivate = true;
+    const generation = JSON.stringify(this.#privateGeneration);
+    try {
+      const cutoff = now - ARCHIVE_DAYS * 86400000;
+      const candidates = this.tasks.filter(t => t.done && (t.completedAt || 0) < cutoff)
+        .map(t => JSON.parse(JSON.stringify(t)));
+      const months = [...new Set(candidates.map(t => monthKeyOf(todayISO(new Date(t.completedAt || now)))))];
+      const operations = [];
+      const gone = new Set();
+      for (const month of months) {
+        let existing;
+        try { existing = await this.loadLog(month); }
+        catch (err) { if (err.code !== 'ENOENT') throw err; existing = []; }
+        const batch = candidates.filter(t => monthKeyOf(todayISO(new Date(t.completedAt || now))) === month
+          && this.taskById(t.id)?.updatedAt === t.updatedAt && this.taskById(t.id)?.done);
+        if (!batch.length) continue;
+        const ids = new Set(batch.map(t => t.id));
+        for (const id of ids) gone.add(id);
+        operations.push({ kind: 'file', path: logPath(month), method: 'PUT',
+          value: JSON.stringify([...existing.filter(t => !ids.has(t.id)), ...batch]) });
+      }
+      if (!gone.size || this.pendingWrites() || generation !== JSON.stringify(this.#privateGeneration)) return 0;
+      const removed = this.tasks.filter(t => gone.has(t.id));
+      const previousMonths = this.logMonths;
+      this.tasks = this.tasks.filter(t => !gone.has(t.id));
+      this.logMonths = [...new Set([...this.logMonths, ...months])].sort();
+      try { await this.#savePrivate(['items'], operations); }
+      catch (err) {
+        this.logMonths = previousMonths;
+        for (const task of removed) {
+          if (!this.taskById(task.id) && !this.deletedTasks.some(d => d.id === task.id)) this.tasks.push(task);
+        }
+        this.#emit();
+        throw err;
+      }
+      return gone.size;
+    } catch (err) {
+      this.privateError ||= err;
+      this.#dirty.add('items');
+      this.dispatchEvent(new Event('sync-state'));
+      throw err;
+    } finally { this.#archivingPrivate = false; }
+  }
+
   async loadLog(monthKey) {
     const blob = await this.cloud.fs.read(logPath(monthKey));
     const text = typeof blob === 'string' ? blob : await blob.text();
     const arr = JSON.parse(text);
+    if (this.isPrivate && !Array.isArray(arr)) throw new Error('Invalid archive data; refusing to replace history');
     return Array.isArray(arr) ? arr.map((t) => normalizeTask(t)) : [];
   }
 
@@ -1263,6 +1389,7 @@ export class Store extends EventTarget {
    * Returns null when stopping (or deleting) overtook the publish.
    */
   async enableShare(listId) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     if (!list) throw new Error('No such list');
     const gen = this.#shareGen.get(listId) || 0;
@@ -1295,6 +1422,7 @@ export class Store extends EventTarget {
   }
 
   async disableShare(listId) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     this.#shareGen.set(listId, (this.#shareGen.get(listId) || 0) + 1);
     if (!list?.shared) return;
@@ -1427,6 +1555,7 @@ export class Store extends EventTarget {
   }
 
   async syncShares() {
+    if (this.isPrivate) return Promise.resolve();
     if (!navigator.onLine) return;
     await this.#reapDeadFiles();
     for (const list of this.lists.filter((l) => l.shared)) {
@@ -1462,6 +1591,7 @@ export class Store extends EventTarget {
 
   /** How a new collaboration is set up: 'kv' (invite by username) or 'link'. */
   collabMode() {
+    if (this.isPrivate) return 'unavailable';
     return typeof this.cloud?.kv?.share === 'function' && !this.#kvOff ? 'kv' : 'link';
   }
 
@@ -1473,6 +1603,7 @@ export class Store extends EventTarget {
    * { invite } with the invite link. Throws if consent is refused.
    */
   async enableCollab(listId) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     if (!list) throw new Error('No such list');
     if (list.collab) {
@@ -1536,6 +1667,7 @@ export class Store extends EventTarget {
 
   /** Owner (KV): share the list at write level with a Puter username. */
   async inviteMember(listId, username) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     const c = list?.collab;
     if (c?.mode !== 'kv' || c.role !== 'owner') throw new Error('Only the owner can invite people');
@@ -1618,6 +1750,7 @@ export class Store extends EventTarget {
 
   /** Owner: stop collaborating. Members keep their copies as private lists. */
   async disableCollab(listId) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     if (!list?.collab) return;
     const released = this.#releaseCollab(list);
@@ -1634,6 +1767,7 @@ export class Store extends EventTarget {
    * confirmation link the owner opens to approve me.
    */
   async joinCollab(manifestUrl) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const res = await fetch(manifestUrl, { cache: 'no-store' });
     if (!res.ok) throw new Error('This invite is no longer available');
     const manifest = parseManifest(await res.text());
@@ -1700,6 +1834,7 @@ export class Store extends EventTarget {
 
   /** Member: a fresh confirmation link (e.g. the first one got lost). */
   async confirmLinkFor(listId) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     if (list?.collab?.role !== 'member' || list.collab.mode === 'kv') return null;
     await this.#publishReplica(list);
@@ -1715,6 +1850,7 @@ export class Store extends EventTarget {
    * share (KV) or unpublishes my replica (links).
    */
   async leaveCollab(listId) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     if (!list?.collab) return;
     if (list.collab.role === 'owner') return this.disableCollab(listId);
@@ -1723,6 +1859,7 @@ export class Store extends EventTarget {
 
   /** Owner: current membership — the live shares of the prefix, or the manifest. */
   async collabMembers(listId) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     if (list?.collab?.role !== 'owner') throw new Error('Only the owner can manage members');
     if (list.collab.mode === 'kv') {
@@ -1738,6 +1875,7 @@ export class Store extends EventTarget {
 
   /** Owner (links): approve a member from their confirmation link. */
   async approveMember(listId, member) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     if (list?.collab?.role !== 'owner' || list.collab.mode === 'kv') throw new Error('Only the owner can approve members');
     if (member.id === list.collab.memberId) throw new Error('You are already the owner');
@@ -1756,6 +1894,7 @@ export class Store extends EventTarget {
    * the list back to a private copy.
    */
   async removeMember(listId, memberId) {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     const list = this.listById(listId);
     if (list?.collab?.role !== 'owner') throw new Error('Only the owner can remove members');
     if (list.collab.mode === 'kv') {
@@ -1862,6 +2001,7 @@ export class Store extends EventTarget {
    * unsynced for WATCHED_RESYNC_MS.
    */
   async syncCollab({ poll = false } = {}) {
+    if (this.isPrivate) return Promise.resolve();
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     if (this.#collabPromise) {
       this.#collabAgain = true;
@@ -2017,6 +2157,7 @@ export class Store extends EventTarget {
    * Resolves to how many lists were added.
    */
   discoverShares({ force = false } = {}) {
+    if (this.isPrivate) return Promise.resolve();
     if (typeof this.cloud?.kv?.listShared !== 'function') return Promise.resolve(0);
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return Promise.resolve(0);
     // A forced call mid-flight may be about a share that pass started too
@@ -2103,6 +2244,7 @@ export class Store extends EventTarget {
    * focus and polling keep lists in sync.
    */
   startCollabWatch() {
+    if (this.isPrivate) return Promise.resolve();
     this.#watchNotifications();
     this.#watchCollab();
     return this.discoverShares({ force: true }).catch(() => 0);
@@ -2311,6 +2453,7 @@ export class Store extends EventTarget {
 
   /** A live .ics URL that calendar apps can subscribe to. */
   async enableCalendarFeed() {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     await this.cloud.fs.write(ICS_PATH, this.buildCalendar(), { createMissingParents: true });
     this.#deadFiles.delete(ICS_PATH); // re-enabled: an owed delete no longer applies
     const url = await this.cloud.fs.getReadURL(ICS_PATH, URL_TTL);
@@ -2319,6 +2462,7 @@ export class Store extends EventTarget {
   }
 
   async disableCalendarFeed() {
+    if (this.isPrivate) throw new Error('Sharing, feeds and collaboration are unavailable in private mode');
     // Clear the setting first: #fileIsLive reads it, and the reaper must
     // not see a queued path that still looks live.
     this.settings.calFeed = null;
@@ -2330,6 +2474,7 @@ export class Store extends EventTarget {
 
   exportAll() {
     return {
+      ...(this.isPrivate ? { archiveNotice: 'Archived logbook bytes are not included in this JSON export. Keep a full Jetson database backup for complete history.' } : {}),
       kind: 'tasks.export',
       v: 1,
       exportedAt: Date.now(),
@@ -2357,6 +2502,11 @@ export class Store extends EventTarget {
    * the publications are not theirs to inherit.
    */
   #dropForeignPublications(data) {
+    if (this.isPrivate) {
+      for (const list of this.lists) Object.assign(list, { shared: null, collab: null, pastCollab: null });
+      this.settings.calFeed = null;
+      return;
+    }
     const me = this.user?.username || null;
     if (!me) return; // identity unknown (offline import): can't tell, keep
     const otherAccount = !!data.account && data.account !== me;
@@ -2380,6 +2530,17 @@ export class Store extends EventTarget {
     const legacyShape = !data?.kind && (Array.isArray(data?.lists)
       || Array.isArray(data?.tasks) || Array.isArray(data?.items?.tasks));
     if (!isExport && !legacyShape) throw new Error('Not a Tasks export');
+    if (this.isPrivate) {
+      if (data.items?.logMonths?.length) throw new Error('This JSON contains archive references, not archive bytes. Restore a full Jetson database backup for history, or explicitly remove logMonths to import only active/recent tasks.');
+      const files = await this.#privateArchiveDeletes();
+      this.#adopt({ ...this.settings, ...(data.settings || {}) }, data.lists || [],
+        data.items || { tasks: data.tasks || [], logMonths: [] });
+      this.#dropForeignPublications(data);
+      this.epoch = uid();
+      this.epochAt = Date.now();
+      await this.#savePrivate(['settings', 'lists', 'items'], files);
+      return;
+    }
     // Imports replace the dataset: share snapshots of lists that are not in
     // the incoming data would otherwise stay published forever.
     const incoming = new Set((data.lists || []).map((l) => l.id));
@@ -2405,8 +2566,28 @@ export class Store extends EventTarget {
     this.syncCollab().catch(() => {});
   }
 
+  async #privateArchiveDeletes() {
+    if (this.pendingWrites() || this.privateError) throw new Error('Copy unsaved edits before replacing private Tasks data.');
+    const files = [];
+    const generation = JSON.stringify(this.#privateGeneration);
+    for (const month of this.logMonths) {
+      try { await this.loadLog(month); }
+      catch (err) { if (err.code !== 'ENOENT') throw err; }
+      files.push({ kind: 'file', path: logPath(month), method: 'DELETE' });
+    }
+    if (generation !== JSON.stringify(this.#privateGeneration)) throw new Error('Tasks changed while preparing replacement; nothing was replaced. Try again.');
+    return files;
+  }
+
   /** Remove everything (used to leave sample-data mode). */
   async wipeAll() {
+    if (this.isPrivate) {
+      const files = await this.#privateArchiveDeletes();
+      this.#adopt({ ...DEFAULT_SETTINGS, theme: this.settings.theme }, [], {});
+      this.epoch = uid();
+      this.epochAt = Date.now();
+      return this.#savePrivate(['settings', 'lists', 'items'], files);
+    }
     // Cleanup of every file this account ever wrote; otherwise share links
     // and the calendar feed keep serving stale data forever. Failures stay
     // queued (#deadFiles) and are retried until the files are really gone.
@@ -2442,5 +2623,5 @@ export function clearDeviceCache() {
   } catch { /* best-effort */ }
 }
 
-export const store = new Store();
+export const store = new Store({ storage });
 export { KV as KV_KEYS, DATA_DIR, sharePath, logPath, ICS_PATH };

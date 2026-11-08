@@ -13,6 +13,11 @@ in `src/game/spider.js`. Desktop windows get realistic card art via a vendored S
 small screens fall back to plain top-left rank-and-suit cards. Games and
 stats can optionally sync to Puter cloud storage.
 
+An explicit `VITE_PRIVATE_STORAGE=1` build instead uses authenticated private
+Jetson storage, with no browser-primary progress or Puter sync. See
+[PRIVATE-STORAGE.md](PRIVATE-STORAGE.md) for the schema, migration/recovery,
+accounting/undo limits, and verification gates. The default build is unchanged.
+
 ## Build and serve
 
 ```
@@ -22,7 +27,7 @@ npm run build
 
 This produces static assets in `dist/`. Serve that directory with any static
 file server. The repo root is **not** directly servable — `index.html` loads
-`/src/main.js` as an ES module, which starts with CSS imports a browser
+`/src/entry.js` as an ES module, which loads `main.js` and CSS imports a browser
 cannot resolve without Vite's dev server or a build step.
 
 ## Development

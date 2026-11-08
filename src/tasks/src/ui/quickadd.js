@@ -48,10 +48,11 @@ export function quickAddBar({ listId = null, defaultDue = null } = {}) {
       const d = current();
       openTaskForm({
         listId: d.listId,
-        prefill: {
+        due: d.due,
+        prefill: input.value.trim() ? {
           title: d.title, due: d.due, dueTime: d.dueTime,
           priority: d.priority, repeat: d.repeat, tags: d.tags, listId: d.listId,
-        },
+        } : null,
       });
       input.value = '';
       renderChips();
